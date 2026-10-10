@@ -1,0 +1,191 @@
+-- Interactive IO Chest Configuration & GPS Calibration Tool
+local config = require("config")
+
+term.clear()
+term.setCursorPos(1, 1)
+
+local function drawHeader()
+    term.clear()
+    term.setCursorPos(1, 1)
+    term.setTextColor(colors.yellow)
+    print("========================================")
+    print("   AetherVault IO & GPS Setup Tool      ")
+    print("========================================")
+    term.setTextColor(colors.white)
+    print()
+end
+
+local function getGPSCoords()
+    term.setTextColor(colors.cyan)
+    write("Locating GPS coordinates...")
+    local x, y, z = gps.locate(3)
+    print()
+    if x and y and z then
+        term.setTextColor(colors.green)
+        print(string.format("GPS position found: X=%.1f, Y=%.1f, Z=%.1f", x, y, z))
+        return x, y, z
+    else
+        term.setTextColor(colors.orange)
+        print("GPS signal not found (no GPS host in range).")
+        return nil
+    end
+end
+
+local function listConnectedInventories()
+    local names = peripheral.getNames()
+    local inventories = {}
+    for _, name in ipairs(names) do
+        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") then
+            table.insert(inventories, name)
+        end
+    end
+    return inventories
+end
+
+local function main()
+    while true do
+        drawHeader()
+        print("1) List Connected & Configured IO Chests")
+        print("2) Register / Edit IO Chest (with GPS)")
+        print("3) Remove Registered IO Chest")
+        print("4) Perform Test Deposit from IO Chest")
+        print("5) Exit")
+        print()
+        write("Select option (1-5): ")
+        local choice = read()
+
+        if choice == "1" then
+            drawHeader()
+            print("Registered IO Chests in config:")
+            local ioChests = config.getIOChests()
+            local count = 0
+            for pName, data in pairs(ioChests) do
+                count = count + 1
+                local present = peripheral.isPresent(pName) and "[CONNECTED]" or "[MISSING]"
+                term.setTextColor(present:find("CONNECTED") and colors.green or colors.red)
+                print(string.format("- %s (%s) %s", pName, data.label, present))
+                term.setTextColor(colors.lightGray)
+                print(string.format("  Coords: X=%d, Y=%d, Z=%d | Role: %s", data.x, data.y, data.z, data.role))
+                term.setTextColor(colors.white)
+            end
+            if count == 0 then
+                print("No IO chests registered yet.")
+            end
+            print()
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "2" then
+            drawHeader()
+            print("Available Connected Inventories:")
+            local inventories = listConnectedInventories()
+            if #inventories == 0 then
+                term.setTextColor(colors.red)
+                print("No inventory peripherals found connected to wired modems!")
+                write("Press Enter to return...")
+                read()
+            else
+                for i, name in ipairs(inventories) do
+                    local isRegistered = config.isIOChest(name) and " [REG]" or ""
+                    print(string.format("%d) %s%s", i, name, isRegistered))
+                end
+                print()
+                write("Select inventory number to register: ")
+                local num = tonumber(read())
+                if num and inventories[num] then
+                    local pName = inventories[num]
+                    drawHeader()
+                    print("Configuring IO Chest: " .. pName)
+                    print()
+                    write("Enter friendly label (e.g., Main IO, Base Mine): ")
+                    local label = read()
+                    if label == "" then label = pName end
+
+                    print()
+                    print("Chest Role:")
+                    print("1) Both (Input & Output)")
+                    print("2) Input only")
+                    print("3) Output only")
+                    write("Choice (1-3) [default 1]: ")
+                    local roleChoice = read()
+                    local role = "both"
+                    if roleChoice == "2" then role = "input"
+                    elseif roleChoice == "3" then role = "output" end
+
+                    print()
+                    local gpsX, gpsY, gpsZ = getGPSCoords()
+                    local finalX, finalY, finalZ
+
+                    if gpsX then
+                        write("Use detected GPS coords? (Y/n): ")
+                        local useGps = read():lower()
+                        if useGps == "" or useGps == "y" then
+                            finalX, finalY, finalZ = math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)
+                        end
+                    end
+
+                    if not finalX then
+                        write("Enter X coordinate: ")
+                        finalX = tonumber(read()) or 0
+                        write("Enter Y coordinate: ")
+                        finalY = tonumber(read()) or 0
+                        write("Enter Z coordinate: ")
+                        finalZ = tonumber(read()) or 0
+                    end
+
+                    config.setIOChest(pName, label, finalX, finalY, finalZ, role)
+                    term.setTextColor(colors.green)
+                    print()
+                    print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
+                    write("Press Enter to continue...")
+                    read()
+                end
+            end
+
+        elseif choice == "3" then
+            drawHeader()
+            local ioChests = config.getIOChests()
+            local list = {}
+            for pName, data in pairs(ioChests) do
+                table.insert(list, pName)
+                print(string.format("%d) %s (%s)", #list, pName, data.label))
+            end
+            if #list == 0 then
+                print("No registered IO chests to remove.")
+            else
+                print()
+                write("Select chest number to remove: ")
+                local num = tonumber(read())
+                if num and list[num] then
+                    config.removeIOChest(list[num])
+                    term.setTextColor(colors.green)
+                    print("Removed " .. list[num])
+                end
+            end
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "4" then
+            local db = require("db")
+            drawHeader()
+            print("Scanning & performing test deposit...")
+            local count, err = db.depositAllIO()
+            if err then
+                term.setTextColor(colors.red)
+                print("Error: " .. tostring(err))
+            else
+                term.setTextColor(colors.green)
+                print(string.format("Successfully deposited %d items into storage system!", count))
+            end
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "5" then
+            term.clear()
+            term.setCursorPos(1, 1)
+            break
+        end
+    end
+end
+
+main()
