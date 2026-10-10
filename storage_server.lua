@@ -26,15 +26,8 @@ db.scanStorage()
 db.addLog("Storage system initialized.", "system")
 
 -- Create main GUI Frame with Basalt 2.5
-local mainFrame = basalt.createFrame()
-    :setTheme({
-        FrameBG = colors.lightGray,
-        FrameText = colors.black,
-        TitleBG = colors.blue,
-        TitleText = colors.white,
-        ButtonBG = colors.cyan,
-        ButtonText = colors.white
-    })
+local mainFrame = (basalt.getMainFrame and basalt.getMainFrame()) or basalt.createFrame()
+mainFrame:setBackground(colors.lightGray)
 
 -- Header / Status Bar
 local titleBar = mainFrame:addFrame()
@@ -407,4 +400,8 @@ basalt.schedule(function()
 end, config.data.scanInterval or 5)
 
 -- Start Basalt Event Loop
-basalt.autoUpdate()
+if basalt.run then
+    basalt.run()
+else
+    basalt.autoUpdate()
+end

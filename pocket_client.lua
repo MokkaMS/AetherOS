@@ -28,9 +28,8 @@ local playerPos = nil
 local currentItems = {}
 
 -- Create main frame fitted for Pocket Computer screen (26x20)
-local mainFrame = basalt.createFrame()
-    :setSize(26, 20)
-    :setBackground(colors.black)
+local mainFrame = (basalt.getMainFrame and basalt.getMainFrame()) or basalt.createFrame()
+mainFrame:setSize(26, 20):setBackground(colors.black)
 
 -- Header Bar
 local titleLabel = mainFrame:addLabel()
@@ -240,4 +239,8 @@ end)
 fetchItems()
 
 -- Run Basalt loop
-basalt.autoUpdate()
+if basalt.run then
+    basalt.run()
+else
+    basalt.autoUpdate()
+end

@@ -29,9 +29,17 @@
 - **Storage Chests**: Chests/barrels connected to the wired modem network used for mass item storage.
 - **Input/Output (I/O) Chests**: Designated chests placed at key locations in your base (e.g. Main Base Entrance, Mine Shaft, Crafting Hub, Mob Farm).
 
-### 3. GPS Host Computers (Optional but Recommended)
-- Place 4 Advanced Computers high in the sky or around your base running the built-in CC:Tweaked `gps host <x> <y> <z>` command.
-- This allows Pocket Computers to fetch exact coordinates in real-time.
+### 3. GPS Host Computers Setup (Wireless 📡)
+> **Note**: GPS Host computers do **NOT** need to be connected via wired cables or connected to the storage network! They operate 100% wirelessly.
+
+1. Craft **4 Advanced Computers** and attach a **Wireless Modem** (or End Modem for long range) to each.
+2. Place the 4 computers in a 3D arrangement around your base (e.g. 3 computers at different corners at `Y=64`, and 1 computer placed higher up at `Y=95`). **Important**: Do not place all 4 in a straight line or on the exact same flat 2D plane.
+3. Stand in front of each computer and press `F3` to write down its exact block coordinates `(X, Y, Z)`.
+4. On each computer, create a `startup.lua` file so it runs automatically on boot:
+   ```lua
+   shell.run("gps", "host", "120", "95", "-240")  -- Replace with that computer's exact X Y Z
+   ```
+5. Whenever your Pocket Computer runs `gps.locate()`, it sends a wireless ping to these 4 hosts to pinpoint your exact 3D player position anywhere in your base!
 
 ---
 
