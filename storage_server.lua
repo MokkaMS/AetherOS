@@ -311,12 +311,14 @@ tabSettingsBtn:onClick(function() setActiveTab("settings") end)
 setActiveTab("items")
 
 ---------------------------------------------------------
--- BACKGROUND REDNET LISTENER THREAD
+-- BACKGROUND REDNET LISTENER (NON-BLOCKING SCHEDULE)
 ---------------------------------------------------------
-mainFrame:addThread(function()
+basalt.schedule(function()
     while true do
-        local event, senderId, message, protocol = os.pullEvent("rednet_message")
-        if protocol == config.data.protocol and type(message) == "table" and message.cmd then
+        local senderId, message, protocol = rednet.receive(config.data.protocol, 0)
+        if not senderId then break end
+
+        if type(message) == "table" and message.cmd then
             local cmd = message.cmd
             local payload = message.payload or {}
             local response = { success = false, message = "Unknown command" }
@@ -391,10 +393,10 @@ mainFrame:addThread(function()
             end
 
             rednet.send(senderId, response, config.data.protocol)
-            populateItemList(searchInput:getValue())
+            populateItemList(searchInput.text or searchInput.value or "")
         end
     end
-end)
+end, 0.1)
 
 ---------------------------------------------------------
 -- PERIODIC BACKGROUND INDEX & AUTO-DEPOSIT SCHEDULER

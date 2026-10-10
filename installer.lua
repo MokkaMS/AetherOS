@@ -764,10 +764,15 @@ tabSettingsBtn:onClick(function() setActiveTab("settings") end)
 
 setActiveTab("items")
 
-mainFrame:addThread(function()
+---------------------------------------------------------
+-- BACKGROUND REDNET LISTENER (NON-BLOCKING SCHEDULE)
+---------------------------------------------------------
+basalt.schedule(function()
     while true do
-        local event, senderId, message, protocol = os.pullEvent("rednet_message")
-        if protocol == config.data.protocol and type(message) == "table" and message.cmd then
+        local senderId, message, protocol = rednet.receive(config.data.protocol, 0)
+        if not senderId then break end
+
+        if type(message) == "table" and message.cmd then
             local cmd = message.cmd
             local payload = message.payload or {}
             local response = { success = false, message = "Unknown command" }
@@ -844,7 +849,7 @@ mainFrame:addThread(function()
             populateItemList(searchInput.text or searchInput.value or "")
         end
     end
-end)
+end, 0.1)
 
 basalt.schedule(function()
     if config.data.autoDeposit then
