@@ -101,7 +101,7 @@ local itemsFrame = contentFrame:addFrame()
 local searchInput = itemsFrame:addInput()
     :setPosition(1, 1)
     :setSize("parent.w - 14", 1)
-    :setPlaceholder("Search items...")
+searchInput.placeholder = "Search items..."
 
 local rescanBtn = itemsFrame:addButton()
     :setPosition("parent.w - 12", 1)
@@ -124,7 +124,7 @@ local withdrawBox = itemsFrame:addFrame()
 local withdrawQtyInput = withdrawBox:addInput()
     :setPosition(1, 1)
     :setSize(8, 1)
-    :setValue("64")
+withdrawQtyInput.text = "64"
 
 local withdrawBtn = withdrawBox:addButton()
     :setPosition(10, 1)
@@ -146,12 +146,12 @@ local function populateItemList(filter)
 end
 
 searchInput:onChange(function(self, text)
-    populateItemList(text)
+    populateItemList(text or searchInput.text or searchInput.value or "")
 end)
 
 rescanBtn:onClick(function()
     db.scanStorage()
-    populateItemList(searchInput:getValue())
+    populateItemList(searchInput.text or searchInput.value or "")
     db.addLog("Manual index refresh triggered.", "info")
 end)
 
@@ -163,7 +163,8 @@ withdrawBtn:onClick(function()
     end
 
     local itemName = selected.args[1]
-    local count = tonumber(withdrawQtyInput:getValue()) or 64
+    local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
+    local count = tonumber(rawVal) or 64
     
     local nearestIO, dist, info = db.findNearestIOChest(nil, "output")
     if not nearestIO then

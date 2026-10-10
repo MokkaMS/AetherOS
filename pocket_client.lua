@@ -50,9 +50,9 @@ local gpsLabel = mainFrame:addLabel()
 local searchInput = mainFrame:addInput()
     :setPosition(1, 3)
     :setSize(26, 1)
-    :setPlaceholder(" Search items...")
     :setBackground(colors.white)
     :setForeground(colors.black)
+searchInput.placeholder = " Search items..."
 
 -- Item List
 local itemList = mainFrame:addList()
@@ -70,9 +70,9 @@ local qtyLabel = mainFrame:addLabel()
 local qtyInput = mainFrame:addInput()
     :setPosition(6, 13)
     :setSize(6, 1)
-    :setValue("64")
     :setBackground(colors.white)
     :setForeground(colors.black)
+qtyInput.text = "64"
 
 local preset16Btn = mainFrame:addButton()
     :setPosition(13, 13)
@@ -148,7 +148,7 @@ local function fetchItems()
     if ok and res.success and res.items then
         currentItems = res.items
         itemList:clear()
-        local filter = searchInput:getValue():lower()
+        local filter = (searchInput.text or searchInput.value or (searchInput.getValue and searchInput:getValue()) or ""):lower()
         
         for _, item in ipairs(currentItems) do
             if filter == "" or item.displayName:lower():find(filter, 1, true) then
@@ -166,7 +166,7 @@ end
 -- Event Listeners
 searchInput:onChange(function(self, text)
     itemList:clear()
-    text = text:lower()
+    text = (text or searchInput.text or searchInput.value or ""):lower()
     for _, item in ipairs(currentItems) do
         if text == "" or item.displayName:lower():find(text, 1, true) then
             local entry = string.format("%-16s x%d", item.displayName:sub(1, 15), item.total)
@@ -175,8 +175,14 @@ searchInput:onChange(function(self, text)
     end
 end)
 
-preset16Btn:onClick(function() qtyInput:setValue("16") end)
-preset64Btn:onClick(function() qtyInput:setValue("64") end)
+preset16Btn:onClick(function()
+    qtyInput.text = "16"
+    if qtyInput.setValue then pcall(function() qtyInput:setValue("16") end) end
+end)
+preset64Btn:onClick(function()
+    qtyInput.text = "64"
+    if qtyInput.setValue then pcall(function() qtyInput:setValue("64") end) end
+end)
 
 withdrawBtn:onClick(function()
     local selected = itemList:getItem(itemList:getItemIndex())
@@ -186,7 +192,8 @@ withdrawBtn:onClick(function()
     end
 
     local itemName = selected.args[1]
-    local count = tonumber(qtyInput:getValue()) or 64
+    local rawVal = qtyInput.text or qtyInput.value or (qtyInput.getValue and qtyInput:getValue()) or "64"
+    local count = tonumber(rawVal) or 64
 
     if not serverId then
         fetchItems()

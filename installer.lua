@@ -559,7 +559,7 @@ local itemsFrame = contentFrame:addFrame()
 local searchInput = itemsFrame:addInput()
     :setPosition(1, 1)
     :setSize("parent.w - 14", 1)
-    :setPlaceholder("Search items...")
+searchInput.placeholder = "Search items..."
 
 local rescanBtn = itemsFrame:addButton()
     :setPosition("parent.w - 12", 1)
@@ -582,7 +582,7 @@ local withdrawBox = itemsFrame:addFrame()
 local withdrawQtyInput = withdrawBox:addInput()
     :setPosition(1, 1)
     :setSize(8, 1)
-    :setValue("64")
+withdrawQtyInput.text = "64"
 
 local withdrawBtn = withdrawBox:addButton()
     :setPosition(10, 1)
@@ -604,12 +604,12 @@ local function populateItemList(filter)
 end
 
 searchInput:onChange(function(self, text)
-    populateItemList(text)
+    populateItemList(text or searchInput.text or searchInput.value or "")
 end)
 
 rescanBtn:onClick(function()
     db.scanStorage()
-    populateItemList(searchInput:getValue())
+    populateItemList(searchInput.text or searchInput.value or "")
     db.addLog("Manual index refresh triggered.", "info")
 end)
 
@@ -621,7 +621,8 @@ withdrawBtn:onClick(function()
     end
 
     local itemName = selected.args[1]
-    local count = tonumber(withdrawQtyInput:getValue()) or 64
+    local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
+    local count = tonumber(rawVal) or 64
     
     local nearestIO, dist, info = db.findNearestIOChest(nil, "output")
     if not nearestIO then
@@ -633,7 +634,7 @@ withdrawBtn:onClick(function()
     if err then
         db.addLog("Withdraw error: " .. err, "error")
     else
-        populateItemList(searchInput:getValue())
+        populateItemList(searchInput.text or searchInput.value or "")
     end
 end)
 
@@ -666,7 +667,7 @@ end
 ioDepositBtn:onClick(function()
     local moved, _ = db.depositAllIO()
     db.addLog(string.format("Manual IO Deposit: imported %d items.", moved), "info")
-    populateItemList(searchInput:getValue())
+    populateItemList(searchInput.text or searchInput.value or "")
 end)
 
 local logsFrame = contentFrame:addFrame()
@@ -724,7 +725,7 @@ local function setActiveTab(tab)
     if tab == "items" then
         itemsFrame:show()
         tabItemsBtn:setBackground(colors.blue):setForeground(colors.white)
-        populateItemList(searchInput:getValue())
+        populateItemList(searchInput.text or searchInput.value or "")
     elseif tab == "io" then
         ioFrame:show()
         tabIOBtn:setBackground(colors.blue):setForeground(colors.white)
@@ -823,7 +824,7 @@ mainFrame:addThread(function()
             end
 
             rednet.send(senderId, response, config.data.protocol)
-            populateItemList(searchInput:getValue())
+            populateItemList(searchInput.text or searchInput.value or "")
         end
     end
 end)
@@ -890,9 +891,9 @@ local gpsLabel = mainFrame:addLabel()
 local searchInput = mainFrame:addInput()
     :setPosition(1, 3)
     :setSize(26, 1)
-    :setPlaceholder(" Search items...")
     :setBackground(colors.white)
     :setForeground(colors.black)
+searchInput.placeholder = " Search items..."
 
 local itemList = mainFrame:addList()
     :setPosition(1, 4)
@@ -908,9 +909,9 @@ local qtyLabel = mainFrame:addLabel()
 local qtyInput = mainFrame:addInput()
     :setPosition(6, 13)
     :setSize(6, 1)
-    :setValue("64")
     :setBackground(colors.white)
     :setForeground(colors.black)
+qtyInput.text = "64"
 
 local preset16Btn = mainFrame:addButton()
     :setPosition(13, 13)
@@ -982,7 +983,7 @@ local function fetchItems()
     if ok and res.success and res.items then
         currentItems = res.items
         itemList:clear()
-        local filter = searchInput:getValue():lower()
+        local filter = (searchInput.text or searchInput.value or (searchInput.getValue and searchInput:getValue()) or ""):lower()
         
         for _, item in ipairs(currentItems) do
             if filter == "" or item.displayName:lower():find(filter, 1, true) then
@@ -999,7 +1000,7 @@ end
 
 searchInput:onChange(function(self, text)
     itemList:clear()
-    text = text:lower()
+    text = (text or searchInput.text or searchInput.value or ""):lower()
     for _, item in ipairs(currentItems) do
         if text == "" or item.displayName:lower():find(text, 1, true) then
             local entry = string.format("%-16s x%d", item.displayName:sub(1, 15), item.total)
@@ -1008,8 +1009,14 @@ searchInput:onChange(function(self, text)
     end
 end)
 
-preset16Btn:onClick(function() qtyInput:setValue("16") end)
-preset64Btn:onClick(function() qtyInput:setValue("64") end)
+preset16Btn:onClick(function()
+    qtyInput.text = "16"
+    if qtyInput.setValue then pcall(function() qtyInput:setValue("16") end) end
+end)
+preset64Btn:onClick(function()
+    qtyInput.text = "64"
+    if qtyInput.setValue then pcall(function() qtyInput:setValue("64") end) end
+end)
 
 withdrawBtn:onClick(function()
     local selected = itemList:getItem(itemList:getItemIndex())
@@ -1019,7 +1026,8 @@ withdrawBtn:onClick(function()
     end
 
     local itemName = selected.args[1]
-    local count = tonumber(qtyInput:getValue()) or 64
+    local rawVal = qtyInput.text or qtyInput.value or (qtyInput.getValue and qtyInput:getValue()) or "64"
+    local count = tonumber(rawVal) or 64
 
     if not serverId then
         fetchItems()
@@ -1280,29 +1288,16 @@ filesToDownload = {
 }
 
 term.setTextColor(colors.cyan)
-print("Fetching AetherVault OS files...")
+print("Installing AetherVault OS system files...")
 
 for _, filename in ipairs(filesToDownload) do
-    write("Downloading " .. filename .. "...")
-    local url = GITHUB_REPO_RAW .. filename
-    local resp, err = http.get(url)
-    
-    if resp then
-        local code = resp.readAll()
-        resp.close()
-        writeFile(filename, code)
+    write("Writing " .. filename .. "...")
+    if embeddedFiles[filename] and writeFile(filename, embeddedFiles[filename]) then
         term.setTextColor(colors.green)
         print(" [OK]")
     else
-        term.setTextColor(colors.yellow)
-        write(" [Unpack Fallback]...")
-        if embeddedFiles[filename] and writeFile(filename, embeddedFiles[filename]) then
-            term.setTextColor(colors.green)
-            print(" [OK]")
-        else
-            term.setTextColor(colors.red)
-            print(" [FAILED]")
-        end
+        term.setTextColor(colors.red)
+        print(" [FAILED]")
     end
     term.setTextColor(colors.cyan)
 end
