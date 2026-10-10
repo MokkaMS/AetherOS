@@ -641,7 +641,7 @@ end)
 local ioFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize("parent.w", "parent.h")
-    :hide()
+ioFrame.visible = false
 
 local ioList = ioFrame:addList()
     :setPosition(1, 1)
@@ -670,10 +670,13 @@ ioDepositBtn:onClick(function()
     populateItemList(searchInput.text or searchInput.value or "")
 end)
 
+---------------------------------------------------------
+-- TAB 3: ACTIVITY LOGS
+---------------------------------------------------------
 local logsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize("parent.w", "parent.h")
-    :hide()
+logsFrame.visible = false
 
 local logsList = logsFrame:addList()
     :setPosition(1, 1)
@@ -689,10 +692,13 @@ local function populateLogs()
     end
 end
 
+---------------------------------------------------------
+-- TAB 4: SETTINGS
+---------------------------------------------------------
 local settingsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize("parent.w", "parent.h")
-    :hide()
+settingsFrame.visible = false
 
 settingsFrame:addLabel():setPosition(2, 2):setText("Protocol: " .. config.data.protocol)
 settingsFrame:addLabel():setPosition(2, 3):setText("Hostname: " .. config.data.hostname)
@@ -711,11 +717,22 @@ autoDepositBtn:onClick(function()
         :setBackground(config.data.autoDeposit and colors.green or colors.red)
 end)
 
+---------------------------------------------------------
+-- TAB SWITCHING NAVIGATION HANDLER
+---------------------------------------------------------
+local function setFrameVisibility(frm, visible)
+    if visible then
+        if frm.show then frm:show() else frm.visible = true end
+    else
+        if frm.hide then frm:hide() else frm.visible = false end
+    end
+end
+
 local function setActiveTab(tab)
-    itemsFrame:hide()
-    ioFrame:hide()
-    logsFrame:hide()
-    settingsFrame:hide()
+    setFrameVisibility(itemsFrame, false)
+    setFrameVisibility(ioFrame, false)
+    setFrameVisibility(logsFrame, false)
+    setFrameVisibility(settingsFrame, false)
 
     tabItemsBtn:setBackground(colors.cyan):setForeground(colors.black)
     tabIOBtn:setBackground(colors.cyan):setForeground(colors.black)
@@ -723,19 +740,19 @@ local function setActiveTab(tab)
     tabSettingsBtn:setBackground(colors.cyan):setForeground(colors.black)
 
     if tab == "items" then
-        itemsFrame:show()
+        setFrameVisibility(itemsFrame, true)
         tabItemsBtn:setBackground(colors.blue):setForeground(colors.white)
         populateItemList(searchInput.text or searchInput.value or "")
     elseif tab == "io" then
-        ioFrame:show()
+        setFrameVisibility(ioFrame, true)
         tabIOBtn:setBackground(colors.blue):setForeground(colors.white)
         populateIOList()
     elseif tab == "logs" then
-        logsFrame:show()
+        setFrameVisibility(logsFrame, true)
         tabLogsBtn:setBackground(colors.blue):setForeground(colors.white)
         populateLogs()
     elseif tab == "settings" then
-        settingsFrame:show()
+        setFrameVisibility(settingsFrame, true)
         tabSettingsBtn:setBackground(colors.blue):setForeground(colors.white)
     end
 end
