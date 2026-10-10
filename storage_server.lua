@@ -124,7 +124,7 @@ local withdrawBox = itemsFrame:addFrame()
 local withdrawQtyInput = withdrawBox:addInput()
     :setPosition(1, 1)
     :setSize(8, 1)
-    :setDefaultText("64")
+    :setValue("64")
 
 local withdrawBtn = withdrawBox:addButton()
     :setPosition(10, 1)

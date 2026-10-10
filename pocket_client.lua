@@ -70,7 +70,7 @@ local qtyLabel = mainFrame:addLabel()
 local qtyInput = mainFrame:addInput()
     :setPosition(6, 13)
     :setSize(6, 1)
-    :setDefaultText("64")
+    :setValue("64")
     :setBackground(colors.white)
     :setForeground(colors.black)
 
