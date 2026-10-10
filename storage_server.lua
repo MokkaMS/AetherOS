@@ -21,29 +21,35 @@ else
     db.addLog("Warning: No wireless modem active. Remote pocket computer control disabled.", "warning")
 end
 
+-- Get terminal dimensions dynamically
+local termW, termH = term.getSize()
+termW = termW or 51
+termH = termH or 19
+local contentH = termH - 4
+
 -- Initial scan
 db.scanStorage()
 db.addLog("Storage system initialized.", "system")
 
 -- Create main GUI Frame with Basalt 2.5
 local mainFrame = (basalt.getMainFrame and basalt.getMainFrame()) or basalt.createFrame()
-mainFrame:setBackground(colors.lightGray)
+mainFrame:setSize(termW, termH):setBackground(colors.lightGray)
 
 -- Header / Status Bar
 local titleBar = mainFrame:addFrame()
     :setPosition(1, 1)
-    :setSize("parent.w", 3)
+    :setSize(termW, 3)
     :setBackground(colors.gray)
 
 local titleLabel = titleBar:addLabel()
     :setPosition(2, 1)
     :setForeground(colors.white)
-    :setText("AETHERVAULT OS v2.5 | SPATIAL STORAGE MATRIX")
+titleLabel.text = "AETHERVAULT OS v2.5 | SPATIAL STORAGE MATRIX"
 
 local statsLabel = titleBar:addLabel()
     :setPosition(2, 2)
     :setForeground(colors.yellow)
-    :setText("Items: 0 | Types: 0 | IO Chests: 0")
+statsLabel.text = "Items: 0 | Types: 0 | IO Chests: 0"
 
 local function updateStatsDisplay()
     local typeCount = #db.itemIndex
@@ -53,7 +59,7 @@ local function updateStatsDisplay()
     end
     local ioCount = 0
     for _ in pairs(config.getIOChests()) do ioCount = ioCount + 1 end
-    statsLabel:setText(string.format("Items: %d | Types: %d | IO Chests: %d", totalItems, typeCount, ioCount))
+    statsLabel.text = string.format("Items: %d | Types: %d | IO Chests: %d", totalItems, typeCount, ioCount)
 end
 
 -- Tab Buttons Navigation
@@ -88,7 +94,7 @@ local tabSettingsBtn = mainFrame:addButton()
 -- Main Container Content Frame
 local contentFrame = mainFrame:addFrame()
     :setPosition(1, 5)
-    :setSize("parent.w", "parent.h - 4")
+    :setSize(termW, contentH)
     :setBackground(colors.lightGray)
 
 ---------------------------------------------------------
@@ -96,15 +102,15 @@ local contentFrame = mainFrame:addFrame()
 ---------------------------------------------------------
 local itemsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
-    :setSize("parent.w", "parent.h")
+    :setSize(termW, contentH)
 
 local searchInput = itemsFrame:addInput()
     :setPosition(1, 1)
-    :setSize("parent.w - 14", 1)
+    :setSize(termW - 14, 1)
 searchInput.placeholder = "Search items..."
 
 local rescanBtn = itemsFrame:addButton()
-    :setPosition("parent.w - 12", 1)
+    :setPosition(termW - 12, 1)
     :setSize(12, 1)
     :setText("Refresh")
     :setBackground(colors.green)
@@ -112,13 +118,13 @@ local rescanBtn = itemsFrame:addButton()
 
 local itemList = itemsFrame:addList()
     :setPosition(1, 3)
-    :setSize("parent.w", "parent.h - 5")
+    :setSize(termW, math.max(1, contentH - 5))
     :setBackground(colors.white)
     :setForeground(colors.black)
 
 local withdrawBox = itemsFrame:addFrame()
-    :setPosition(1, "parent.h - 1")
-    :setSize("parent.w", 2)
+    :setPosition(1, math.max(1, contentH - 1))
+    :setSize(termW, 2)
     :setBackground(colors.gray)
 
 local withdrawQtyInput = withdrawBox:addInput()
@@ -132,18 +138,29 @@ local withdrawBtn = withdrawBox:addButton()
     :setText("Withdraw to Closest IO")
     :setBackground(colors.orange)
 
+local selectedItemName = nil
+
 local function populateItemList(filter)
     itemList:clear()
+    selectedItemName = nil
     filter = filter and filter:lower() or ""
     
     for _, item in ipairs(db.itemIndex) do
         if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
             local entryText = string.format("%-28s x%d", item.displayName, item.total)
-            itemList:addItem(entryText, nil, nil, item.name)
+            itemList:addItem({ text = entryText, value = item.name, name = item.name })
         end
     end
     updateStatsDisplay()
 end
+
+itemList:onSelect(function(self, item, index)
+    if type(item) == "table" then
+        selectedItemName = item.value or item.name
+    elseif type(item) == "string" then
+        selectedItemName = item
+    end
+end)
 
 searchInput:onChange(function(self, text)
     populateItemList(text or searchInput.text or searchInput.value or "")
@@ -156,13 +173,11 @@ rescanBtn:onClick(function()
 end)
 
 withdrawBtn:onClick(function()
-    local selected = itemList:getItem(itemList:getItemIndex())
-    if not selected or not selected.args or not selected.args[1] then
+    if not selectedItemName then
         db.addLog("Select an item from the list first!", "warning")
         return
     end
 
-    local itemName = selected.args[1]
     local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
     local count = tonumber(rawVal) or 64
     
@@ -172,11 +187,11 @@ withdrawBtn:onClick(function()
         return
     end
 
-    local moved, err = db.withdraw(itemName, count, nearestIO)
+    local moved, err = db.withdraw(selectedItemName, count, nearestIO)
     if err then
         db.addLog("Withdraw error: " .. err, "error")
     else
-        populateItemList(searchInput:getValue())
+        populateItemList(searchInput.text or searchInput.value or "")
     end
 end)
 
@@ -185,16 +200,16 @@ end)
 ---------------------------------------------------------
 local ioFrame = contentFrame:addFrame()
     :setPosition(1, 1)
-    :setSize("parent.w", "parent.h")
+    :setSize(termW, contentH)
 ioFrame.visible = false
 
 local ioList = ioFrame:addList()
     :setPosition(1, 1)
-    :setSize("parent.w", "parent.h - 3")
+    :setSize(termW, math.max(1, contentH - 3))
     :setBackground(colors.white)
 
 local ioDepositBtn = ioFrame:addButton()
-    :setPosition(1, "parent.h - 1")
+    :setPosition(1, math.max(1, contentH - 1))
     :setSize(24, 1)
     :setText("Deposit All IO Chests")
     :setBackground(colors.green)
@@ -220,12 +235,12 @@ end)
 ---------------------------------------------------------
 local logsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
-    :setSize("parent.w", "parent.h")
+    :setSize(termW, contentH)
 logsFrame.visible = false
 
 local logsList = logsFrame:addList()
     :setPosition(1, 1)
-    :setSize("parent.w", "parent.h")
+    :setSize(termW, contentH)
     :setBackground(colors.black)
     :setForeground(colors.green)
 
@@ -242,7 +257,7 @@ end
 ---------------------------------------------------------
 local settingsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
-    :setSize("parent.w", "parent.h")
+    :setSize(termW, contentH)
 settingsFrame.visible = false
 
 settingsFrame:addLabel():setPosition(2, 2):setText("Protocol: " .. config.data.protocol)
@@ -307,7 +322,6 @@ tabIOBtn:onClick(function() setActiveTab("io") end)
 tabLogsBtn:onClick(function() setActiveTab("logs") end)
 tabSettingsBtn:onClick(function() setActiveTab("settings") end)
 
--- Initial view setup
 setActiveTab("items")
 
 ---------------------------------------------------------
@@ -342,7 +356,6 @@ basalt.schedule(function()
                 local count = payload.count or 64
                 local gpsPos = payload.gpsPos
 
-                -- Automatically find nearest IO chest based on caller's GPS position
                 local targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
                 
                 if not targetIO then
@@ -398,9 +411,6 @@ basalt.schedule(function()
     end
 end, 0.1)
 
----------------------------------------------------------
--- PERIODIC BACKGROUND INDEX & AUTO-DEPOSIT SCHEDULER
----------------------------------------------------------
 basalt.schedule(function()
     if config.data.autoDeposit then
         db.depositAllIO()
@@ -410,7 +420,6 @@ basalt.schedule(function()
     updateStatsDisplay()
 end, config.data.scanInterval or 5)
 
--- Start Basalt Event Loop
 if basalt.run then
     basalt.run()
 else

@@ -2,7 +2,6 @@
 local config = require("config")
 local net = require("net_protocol")
 
--- Check for Basalt framework
 local basaltOK, basalt = pcall(require, "basalt")
 if not basaltOK then
     term.setTextColor(colors.red)
@@ -11,7 +10,6 @@ if not basaltOK then
     return
 end
 
--- Open wireless modem
 local modemOK, err = net.openWirelessModem()
 if not modemOK then
     term.clear()
@@ -22,31 +20,28 @@ if not modemOK then
     return
 end
 
--- State variables
 local serverId = nil
 local playerPos = nil
 local currentItems = {}
+local selectedItemName = nil
 
--- Create main frame fitted for Pocket Computer screen (26x20)
 local mainFrame = (basalt.getMainFrame and basalt.getMainFrame()) or basalt.createFrame()
 mainFrame:setSize(26, 20):setBackground(colors.black)
 
--- Header Bar
 local titleLabel = mainFrame:addLabel()
     :setPosition(1, 1)
     :setSize(26, 1)
     :setBackground(colors.blue)
     :setForeground(colors.white)
-    :setText(" AETHERVAULT REMOTE ")
+titleLabel.text = " AETHERVAULT REMOTE "
 
 local gpsLabel = mainFrame:addLabel()
     :setPosition(1, 2)
     :setSize(26, 1)
     :setBackground(colors.gray)
     :setForeground(colors.yellow)
-    :setText(" GPS: Locating...")
+gpsLabel.text = " GPS: Locating..."
 
--- Search Box
 local searchInput = mainFrame:addInput()
     :setPosition(1, 3)
     :setSize(26, 1)
@@ -54,18 +49,16 @@ local searchInput = mainFrame:addInput()
     :setForeground(colors.black)
 searchInput.placeholder = " Search items..."
 
--- Item List
 local itemList = mainFrame:addList()
     :setPosition(1, 4)
     :setSize(26, 9)
     :setBackground(colors.lightGray)
     :setForeground(colors.black)
 
--- Controls Section
 local qtyLabel = mainFrame:addLabel()
     :setPosition(1, 13)
-    :setText("Qty:")
     :setForeground(colors.white)
+qtyLabel.text = "Qty:"
 
 local qtyInput = mainFrame:addInput()
     :setPosition(6, 13)
@@ -88,7 +81,6 @@ local preset64Btn = mainFrame:addButton()
     :setBackground(colors.cyan)
     :setForeground(colors.white)
 
--- Action Buttons
 local withdrawBtn = mainFrame:addButton()
     :setPosition(1, 15)
     :setSize(26, 1)
@@ -103,12 +95,11 @@ local depositBtn = mainFrame:addButton()
     :setBackground(colors.green)
     :setForeground(colors.white)
 
--- Status / Output Feedback Label
 local statusLabel = mainFrame:addLabel()
     :setPosition(1, 17)
     :setSize(26, 2)
     :setForeground(colors.yellow)
-    :setText(" Connecting to network...")
+statusLabel.text = " Connecting to network..."
 
 local refreshBtn = mainFrame:addButton()
     :setPosition(1, 19)
@@ -117,60 +108,67 @@ local refreshBtn = mainFrame:addButton()
     :setBackground(colors.gray)
     :setForeground(colors.white)
 
--- Function to update GPS coordinates
 local function updateGPS()
     local x, y, z = gps.locate(1.5)
     if x and y and z then
         playerPos = { x = math.floor(x), y = math.floor(y), z = math.floor(z) }
-        gpsLabel:setText(string.format(" GPS: %d, %d, %d", playerPos.x, playerPos.y, playerPos.z))
+        gpsLabel.text = string.format(" GPS: %d, %d, %d", playerPos.x, playerPos.y, playerPos.z)
     else
         playerPos = nil
-        gpsLabel:setText(" GPS: Signal Unavailable")
+        gpsLabel.text = " GPS: Signal Unavailable"
     end
 end
 
--- Function to connect to server and fetch item catalog
 local function fetchItems()
     updateGPS()
     
     if not serverId then
-        statusLabel:setText(" Searching for server...")
+        statusLabel.text = " Searching for server..."
         local sId, errStr = net.findServer(2)
         if not sId then
-            statusLabel:setText(" Error: Server offline")
+            statusLabel.text = " Error: Server offline"
             return
         end
         serverId = sId
     end
 
-    statusLabel:setText(" Fetching catalog...")
+    statusLabel.text = " Fetching catalog..."
     local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 2.5)
     if ok and res.success and res.items then
         currentItems = res.items
         itemList:clear()
+        selectedItemName = nil
         local filter = (searchInput.text or searchInput.value or (searchInput.getValue and searchInput:getValue()) or ""):lower()
         
         for _, item in ipairs(currentItems) do
             if filter == "" or item.displayName:lower():find(filter, 1, true) then
-                local text = string.format("%-16s x%d", item.displayName:sub(1, 15), item.total)
-                itemList:addItem(text, nil, nil, item.name)
+                local entryText = string.format("%-15s x%d", item.displayName:sub(1, 14), item.total)
+                itemList:addItem({ text = entryText, value = item.name, name = item.name })
             end
         end
-        statusLabel:setText(" Connected: " .. #currentItems .. " item types")
+        statusLabel.text = " Connected: " .. #currentItems .. " item types"
     else
         serverId = nil
-        statusLabel:setText(" Connection failed!")
+        statusLabel.text = " Connection failed!"
     end
 end
 
--- Event Listeners
+itemList:onSelect(function(self, item, index)
+    if type(item) == "table" then
+        selectedItemName = item.value or item.name
+    elseif type(item) == "string" then
+        selectedItemName = item
+    end
+end)
+
 searchInput:onChange(function(self, text)
     itemList:clear()
+    selectedItemName = nil
     text = (text or searchInput.text or searchInput.value or ""):lower()
     for _, item in ipairs(currentItems) do
         if text == "" or item.displayName:lower():find(text, 1, true) then
-            local entry = string.format("%-16s x%d", item.displayName:sub(1, 15), item.total)
-            itemList:addItem(entry, nil, nil, item.name)
+            local entryText = string.format("%-15s x%d", item.displayName:sub(1, 14), item.total)
+            itemList:addItem({ text = entryText, value = item.name, name = item.name })
         end
     end
 end)
@@ -185,13 +183,11 @@ preset64Btn:onClick(function()
 end)
 
 withdrawBtn:onClick(function()
-    local selected = itemList:getItem(itemList:getItemIndex())
-    if not selected or not selected.args or not selected.args[1] then
-        statusLabel:setText(" Select an item first!")
+    if not selectedItemName then
+        statusLabel.text = " Select an item first!"
         return
     end
 
-    local itemName = selected.args[1]
     local rawVal = qtyInput.text or qtyInput.value or (qtyInput.getValue and qtyInput:getValue()) or "64"
     local count = tonumber(rawVal) or 64
 
@@ -200,9 +196,9 @@ withdrawBtn:onClick(function()
         if not serverId then return end
     end
 
-    statusLabel:setText(" Sending withdraw request...")
+    statusLabel.text = " Sending withdraw request..."
     local payload = {
-        item = itemName,
+        item = selectedItemName,
         count = count,
         gpsPos = playerPos
     }
@@ -210,10 +206,10 @@ withdrawBtn:onClick(function()
     local ok, res = net.sendRequest(serverId, "WITHDRAW_ITEM", payload, 3)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
-        statusLabel:setText(string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr))
+        statusLabel.text = string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr)
         fetchItems()
     else
-        statusLabel:setText(" Error: " .. (res and res.message or "Timeout"))
+        statusLabel.text = " Error: " .. (res and res.message or "Timeout")
     end
 end)
 
@@ -223,7 +219,7 @@ depositBtn:onClick(function()
         if not serverId then return end
     end
 
-    statusLabel:setText(" Requesting deposit...")
+    statusLabel.text = " Requesting deposit..."
     local payload = {
         gpsPos = playerPos
     }
@@ -231,10 +227,10 @@ depositBtn:onClick(function()
     local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 3)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
-        statusLabel:setText(string.format(" Deposited x%d from %s%s", res.count or 0, res.chestLabel or "IO", distStr))
+        statusLabel.text = string.format(" Deposited x%d from %s%s", res.count or 0, res.chestLabel or "IO", distStr)
         fetchItems()
     else
-        statusLabel:setText(" Error: " .. (res and res.message or "Timeout"))
+        statusLabel.text = " Error: " .. (res and res.message or "Timeout")
     end
 end)
 
@@ -242,10 +238,8 @@ refreshBtn:onClick(function()
     fetchItems()
 end)
 
--- Initial connection attempt
 fetchItems()
 
--- Run Basalt loop
 if basalt.run then
     basalt.run()
 else
