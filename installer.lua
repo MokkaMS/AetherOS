@@ -475,32 +475,62 @@ local net = {}
 
 -- Open wireless modem on computer if available
 function net.openWirelessModem()
-    local modem = peripheral.find("modem", function(name, wrapped)
-        return wrapped.isWireless()
-    end)
-    if modem then
-        local modemSide = peripheral.getName(modem)
-        rednet.open(modemSide)
-        return true, modemSide
+    local openedSide = nil
+    local names = peripheral.getNames()
+    
+    for _, name in ipairs(names) do
+        if peripheral.getType(name) == "modem" then
+            local p = peripheral.wrap(name)
+            if p and p.isWireless and p.isWireless() then
+                rednet.open(name)
+                openedSide = name
+            end
+        end
     end
-    -- Fallback: check all modems
+    
+    if openedSide then
+        return true, openedSide
+    end
+
+    -- Fallback check standard sides
     for _, side in ipairs(rs.getSides()) do
         if peripheral.isPresent(side) and peripheral.getType(side) == "modem" then
-            rednet.open(side)
-            return true, side
+            local p = peripheral.wrap(side)
+            if p and p.isWireless and p.isWireless() then
+                rednet.open(side)
+                return true, side
+            end
         end
     end
     return false, "No wireless modem found!"
 end
 
--- Find server on wireless network
-function net.findServer(timeout)
+-- Find server on wireless network using lookup, broadcast ping, or direct server ID
+function net.findServer(timeout, targetServerId)
     timeout = timeout or 2
+    
+    -- If user provided exact Server ID, check it first
+    if targetServerId and tonumber(targetServerId) then
+        local ok, res = net.sendRequest(tonumber(targetServerId), "PING", {}, timeout)
+        if ok and res.success then
+            return tonumber(targetServerId)
+        end
+    end
+
+    -- Method 1: Rednet lookup
     local serverId = rednet.lookup(config.data.protocol, config.data.hostname)
     if serverId then
         return serverId
     end
-    return nil, "Storage Server not found on Rednet channel " .. config.data.protocol
+
+    -- Method 2: Broadcast PING
+    rednet.broadcast({ cmd = "PING" }, config.data.protocol)
+    local senderId, res = rednet.receive(config.data.protocol, timeout)
+    if senderId and type(res) == "table" and res.success then
+        return senderId
+    end
+
+    return nil, "Storage Server not found on protocol " .. config.data.protocol
 end
 
 -- Send RPC request to server and wait for reply
@@ -604,25 +634,72 @@ local function main()
             drawHeader()
             print("Available Connected Inventories:")
             local inventories = listConnectedInventories()
-            if #inventories == 0 then
-                term.setTextColor(colors.red)
-                print("No inventory peripherals found connected to wired modems!")
-                write("Press Enter to return...")
-                read()
-            else
-                for i, name in ipairs(inventories) do
+            
+            if #inventories > 0 then
+                -- Display compact list of up to 10 inventories
+                for i = 1, math.min(#inventories, 10) do
+                    local name = inventories[i]
                     local isRegistered = config.isIOChest(name) and " [REG]" or ""
-                    print(string.format("%d) %s%s", i, name, isRegistered))
+                    print(string.format("  %d) %s%s", i, name, isRegistered))
                 end
-                print()
-                write("Select inventory number to register: ")
-                local num = tonumber(read())
+                if #inventories > 10 then
+                    print(string.format("  ... (%d more connected inventories)", #inventories - 10))
+                end
+            end
+            print()
+            write("Enter chest # (e.g. 0, 12), menu # (1-10), or full name: ")
+            local inputStr = read()
+            if inputStr and inputStr ~= "" then
+                local selectedPName = nil
+                local num = tonumber(inputStr)
+
                 if num and inventories[num] then
-                    local pName = inventories[num]
+                    selectedPName = inventories[num]
+                else
+                    -- Search for matching chest name ending with _<inputStr> or containing inputStr
+                    local matches = {}
+                    for _, pName in ipairs(inventories) do
+                        if pName == inputStr or pName:sub(-#("_" .. inputStr)) == ("_" .. inputStr) or pName:find(inputStr, 1, true) then
+                            table.insert(matches, pName)
+                        end
+                    end
+
+                    if #matches == 1 then
+                        selectedPName = matches[1]
+                    elseif #matches > 1 then
+                        print()
+                        print("Multiple matching chests found:")
+                        for i, m in ipairs(matches) do
+                            print(string.format("  %d) %s", i, m))
+                        end
+                        write("Select match number (1-" .. #matches .. "): ")
+                        local mNum = tonumber(read())
+                        if mNum and matches[mNum] then
+                            selectedPName = matches[mNum]
+                        end
+                    else
+                        -- Direct peripheral check fallbacks
+                        if peripheral.isPresent(inputStr) then
+                            selectedPName = inputStr
+                        elseif peripheral.isPresent("minecraft:chest_" .. inputStr) then
+                            selectedPName = "minecraft:chest_" .. inputStr
+                        elseif peripheral.isPresent("minecraft:barrel_" .. inputStr) then
+                            selectedPName = "minecraft:barrel_" .. inputStr
+                        end
+                    end
+                end
+
+                if not selectedPName then
+                    term.setTextColor(colors.red)
+                    print("Could not find connected chest matching '" .. inputStr .. "'!")
+                    write("Press Enter to return...")
+                    read()
+                else
+                    local pName = selectedPName
                     drawHeader()
                     print("Configuring IO Chest: " .. pName)
                     print()
-                    write("Enter friendly label (e.g., Main IO, Base Mine): ")
+                    write("Enter friendly label (e.g. Main IO, Base Mine): ")
                     local label = read()
                     if label == "" then label = pName end
 
@@ -893,6 +970,7 @@ local withdrawBtn = withdrawBox:addButton()
     :setForeground(colors.white)
 
 local selectedItems = {}
+local filteredItems = {}
 local currentAutoMatch = nil
 
 local function getSelectedCount()
@@ -941,14 +1019,23 @@ end
 
 local function populateItemList(filter)
     itemList:clear()
+    filteredItems = {}
     filter = filter and filter:lower() or ""
     
     for _, item in ipairs(db.itemIndex) do
         if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
             local isSel = selectedItems[item.name]
             local prefix = isSel and "[x] " or "[ ] "
-            local entryText = string.format("%s%-24s x%d", prefix, item.displayName, item.total)
-            itemList:addItem({ text = entryText, value = item.name, name = item.name })
+            
+            local maxNameLen = math.max(10, termW - 14)
+            local dispName = item.displayName
+            if #dispName > maxNameLen then
+                dispName = dispName:sub(1, maxNameLen - 2) .. ".."
+            end
+            local entryText = string.format("%s%-" .. maxNameLen .. "s %6d", prefix, dispName, item.total)
+
+            itemList:addItem(entryText)
+            table.insert(filteredItems, item.name)
         end
     end
     updateStatsDisplay()
@@ -958,8 +1045,10 @@ end
 
 itemList:onSelect(function(self, item, index)
     local itemName = nil
-    if type(item) == "table" then
-        itemName = item.value or item.name
+    if type(index) == "number" and filteredItems[index] then
+        itemName = filteredItems[index]
+    elseif type(item) == "table" then
+        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
     elseif type(item) == "string" then
         itemName = item
     end
@@ -1006,10 +1095,14 @@ pullAllBtn:onClick(function()
 end)
 
 rescanBtn:onClick(function()
-    db.addLog("Refreshing storage index...", "info")
-    db.scanStorage()
-    populateItemList(searchInput.text or searchInput.value or "")
-    db.addLog("Storage index updated.", "info")
+    db.addLog("Refreshing storage index in background...", "info")
+    rescanBtn:setText("Scanning..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        db.scanStorage()
+        populateItemList(searchInput.text or searchInput.value or "")
+        rescanBtn:setText("Refresh"):setBackground(colors.green)
+        db.addLog("Storage refresh complete.", "info")
+    end, 0)
 end)
 
 withdrawBtn:onClick(function()
@@ -1443,8 +1536,11 @@ local function updateAutoComplete(filterText)
     end
 end
 
+local filteredItems = {}
+
 local function populateList()
     itemList:clear()
+    filteredItems = {}
     local filter = (searchInput.text or searchInput.value or ""):lower()
     updateAutoComplete(filter)
 
@@ -1452,8 +1548,13 @@ local function populateList()
         if filter == "" or item.displayName:lower():find(filter, 1, true) then
             local isSel = selectedItems[item.name]
             local prefix = isSel and "[x]" or "[ ]"
-            local entryText = string.format("%s %-12s x%d", prefix, item.displayName:sub(1, 11), item.total)
-            itemList:addItem({ text = entryText, value = item.name, name = item.name })
+            local dispName = item.displayName
+            if #dispName > 12 then
+                dispName = dispName:sub(1, 10) .. ".."
+            end
+            local entryText = string.format("%s %-12s %5d", prefix, dispName, item.total)
+            itemList:addItem(entryText)
+            table.insert(filteredItems, item.name)
         end
     end
     updateWithdrawButtonText()
@@ -1476,7 +1577,6 @@ local function fetchItems()
     local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 2.5)
     if ok and res.success and res.items then
         currentItems = res.items
-        -- Ensure items are sorted by total quantity descending
         table.sort(currentItems, function(a, b)
             if a.total == b.total then return a.displayName:lower() < b.displayName:lower() end
             return a.total > b.total
@@ -1491,8 +1591,10 @@ end
 
 itemList:onSelect(function(self, item, index)
     local itemName = nil
-    if type(item) == "table" then
-        itemName = item.value or item.name
+    if type(index) == "number" and filteredItems[index] then
+        itemName = filteredItems[index]
+    elseif type(item) == "table" then
+        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
     elseif type(item) == "string" then
         itemName = item
     end

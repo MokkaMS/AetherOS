@@ -79,25 +79,72 @@ local function main()
             drawHeader()
             print("Available Connected Inventories:")
             local inventories = listConnectedInventories()
-            if #inventories == 0 then
-                term.setTextColor(colors.red)
-                print("No inventory peripherals found connected to wired modems!")
-                write("Press Enter to return...")
-                read()
-            else
-                for i, name in ipairs(inventories) do
+            
+            if #inventories > 0 then
+                -- Display compact list of up to 10 inventories
+                for i = 1, math.min(#inventories, 10) do
+                    local name = inventories[i]
                     local isRegistered = config.isIOChest(name) and " [REG]" or ""
-                    print(string.format("%d) %s%s", i, name, isRegistered))
+                    print(string.format("  %d) %s%s", i, name, isRegistered))
                 end
-                print()
-                write("Select inventory number to register: ")
-                local num = tonumber(read())
+                if #inventories > 10 then
+                    print(string.format("  ... (%d more connected inventories)", #inventories - 10))
+                end
+            end
+            print()
+            write("Enter chest # (e.g. 0, 12), menu # (1-10), or full name: ")
+            local inputStr = read()
+            if inputStr and inputStr ~= "" then
+                local selectedPName = nil
+                local num = tonumber(inputStr)
+
                 if num and inventories[num] then
-                    local pName = inventories[num]
+                    selectedPName = inventories[num]
+                else
+                    -- Search for matching chest name ending with _<inputStr> or containing inputStr
+                    local matches = {}
+                    for _, pName in ipairs(inventories) do
+                        if pName == inputStr or pName:sub(-#("_" .. inputStr)) == ("_" .. inputStr) or pName:find(inputStr, 1, true) then
+                            table.insert(matches, pName)
+                        end
+                    end
+
+                    if #matches == 1 then
+                        selectedPName = matches[1]
+                    elseif #matches > 1 then
+                        print()
+                        print("Multiple matching chests found:")
+                        for i, m in ipairs(matches) do
+                            print(string.format("  %d) %s", i, m))
+                        end
+                        write("Select match number (1-" .. #matches .. "): ")
+                        local mNum = tonumber(read())
+                        if mNum and matches[mNum] then
+                            selectedPName = matches[mNum]
+                        end
+                    else
+                        -- Direct peripheral check fallbacks
+                        if peripheral.isPresent(inputStr) then
+                            selectedPName = inputStr
+                        elseif peripheral.isPresent("minecraft:chest_" .. inputStr) then
+                            selectedPName = "minecraft:chest_" .. inputStr
+                        elseif peripheral.isPresent("minecraft:barrel_" .. inputStr) then
+                            selectedPName = "minecraft:barrel_" .. inputStr
+                        end
+                    end
+                end
+
+                if not selectedPName then
+                    term.setTextColor(colors.red)
+                    print("Could not find connected chest matching '" .. inputStr .. "'!")
+                    write("Press Enter to return...")
+                    read()
+                else
+                    local pName = selectedPName
                     drawHeader()
                     print("Configuring IO Chest: " .. pName)
                     print()
-                    write("Enter friendly label (e.g., Main IO, Base Mine): ")
+                    write("Enter friendly label (e.g. Main IO, Base Mine): ")
                     local label = read()
                     if label == "" then label = pName end
 

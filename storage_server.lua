@@ -175,6 +175,7 @@ local withdrawBtn = withdrawBox:addButton()
     :setForeground(colors.white)
 
 local selectedItems = {}
+local filteredItems = {}
 local currentAutoMatch = nil
 
 local function getSelectedCount()
@@ -223,14 +224,23 @@ end
 
 local function populateItemList(filter)
     itemList:clear()
+    filteredItems = {}
     filter = filter and filter:lower() or ""
     
     for _, item in ipairs(db.itemIndex) do
         if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
             local isSel = selectedItems[item.name]
             local prefix = isSel and "[x] " or "[ ] "
-            local entryText = string.format("%s%-24s x%d", prefix, item.displayName, item.total)
-            itemList:addItem({ text = entryText, value = item.name, name = item.name })
+            
+            local maxNameLen = math.max(10, termW - 14)
+            local dispName = item.displayName
+            if #dispName > maxNameLen then
+                dispName = dispName:sub(1, maxNameLen - 2) .. ".."
+            end
+            local entryText = string.format("%s%-" .. maxNameLen .. "s %6d", prefix, dispName, item.total)
+
+            itemList:addItem(entryText)
+            table.insert(filteredItems, item.name)
         end
     end
     updateStatsDisplay()
@@ -240,8 +250,10 @@ end
 
 itemList:onSelect(function(self, item, index)
     local itemName = nil
-    if type(item) == "table" then
-        itemName = item.value or item.name
+    if type(index) == "number" and filteredItems[index] then
+        itemName = filteredItems[index]
+    elseif type(item) == "table" then
+        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
     elseif type(item) == "string" then
         itemName = item
     end
@@ -288,10 +300,14 @@ pullAllBtn:onClick(function()
 end)
 
 rescanBtn:onClick(function()
-    db.addLog("Refreshing storage index...", "info")
-    db.scanStorage()
-    populateItemList(searchInput.text or searchInput.value or "")
-    db.addLog("Storage index updated.", "info")
+    db.addLog("Refreshing storage index in background...", "info")
+    rescanBtn:setText("Scanning..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        db.scanStorage()
+        populateItemList(searchInput.text or searchInput.value or "")
+        rescanBtn:setText("Refresh"):setBackground(colors.green)
+        db.addLog("Storage refresh complete.", "info")
+    end, 0)
 end)
 
 withdrawBtn:onClick(function()

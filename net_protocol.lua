@@ -5,32 +5,62 @@ local net = {}
 
 -- Open wireless modem on computer if available
 function net.openWirelessModem()
-    local modem = peripheral.find("modem", function(name, wrapped)
-        return wrapped.isWireless()
-    end)
-    if modem then
-        local modemSide = peripheral.getName(modem)
-        rednet.open(modemSide)
-        return true, modemSide
+    local openedSide = nil
+    local names = peripheral.getNames()
+    
+    for _, name in ipairs(names) do
+        if peripheral.getType(name) == "modem" then
+            local p = peripheral.wrap(name)
+            if p and p.isWireless and p.isWireless() then
+                rednet.open(name)
+                openedSide = name
+            end
+        end
     end
-    -- Fallback: check all modems
+    
+    if openedSide then
+        return true, openedSide
+    end
+
+    -- Fallback check standard sides
     for _, side in ipairs(rs.getSides()) do
         if peripheral.isPresent(side) and peripheral.getType(side) == "modem" then
-            rednet.open(side)
-            return true, side
+            local p = peripheral.wrap(side)
+            if p and p.isWireless and p.isWireless() then
+                rednet.open(side)
+                return true, side
+            end
         end
     end
     return false, "No wireless modem found!"
 end
 
--- Find server on wireless network
-function net.findServer(timeout)
+-- Find server on wireless network using lookup, broadcast ping, or direct server ID
+function net.findServer(timeout, targetServerId)
     timeout = timeout or 2
+    
+    -- If user provided exact Server ID, check it first
+    if targetServerId and tonumber(targetServerId) then
+        local ok, res = net.sendRequest(tonumber(targetServerId), "PING", {}, timeout)
+        if ok and res.success then
+            return tonumber(targetServerId)
+        end
+    end
+
+    -- Method 1: Rednet lookup
     local serverId = rednet.lookup(config.data.protocol, config.data.hostname)
     if serverId then
         return serverId
     end
-    return nil, "Storage Server not found on Rednet channel " .. config.data.protocol
+
+    -- Method 2: Broadcast PING
+    rednet.broadcast({ cmd = "PING" }, config.data.protocol)
+    local senderId, res = rednet.receive(config.data.protocol, timeout)
+    if senderId and type(res) == "table" and res.success then
+        return senderId
+    end
+
+    return nil, "Storage Server not found on protocol " .. config.data.protocol
 end
 
 -- Send RPC request to server and wait for reply

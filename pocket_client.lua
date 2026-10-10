@@ -165,8 +165,11 @@ local function updateAutoComplete(filterText)
     end
 end
 
+local filteredItems = {}
+
 local function populateList()
     itemList:clear()
+    filteredItems = {}
     local filter = (searchInput.text or searchInput.value or ""):lower()
     updateAutoComplete(filter)
 
@@ -174,8 +177,13 @@ local function populateList()
         if filter == "" or item.displayName:lower():find(filter, 1, true) then
             local isSel = selectedItems[item.name]
             local prefix = isSel and "[x]" or "[ ]"
-            local entryText = string.format("%s %-12s x%d", prefix, item.displayName:sub(1, 11), item.total)
-            itemList:addItem({ text = entryText, value = item.name, name = item.name })
+            local dispName = item.displayName
+            if #dispName > 12 then
+                dispName = dispName:sub(1, 10) .. ".."
+            end
+            local entryText = string.format("%s %-12s %5d", prefix, dispName, item.total)
+            itemList:addItem(entryText)
+            table.insert(filteredItems, item.name)
         end
     end
     updateWithdrawButtonText()
@@ -198,7 +206,6 @@ local function fetchItems()
     local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 2.5)
     if ok and res.success and res.items then
         currentItems = res.items
-        -- Ensure items are sorted by total quantity descending
         table.sort(currentItems, function(a, b)
             if a.total == b.total then return a.displayName:lower() < b.displayName:lower() end
             return a.total > b.total
@@ -213,8 +220,10 @@ end
 
 itemList:onSelect(function(self, item, index)
     local itemName = nil
-    if type(item) == "table" then
-        itemName = item.value or item.name
+    if type(index) == "number" and filteredItems[index] then
+        itemName = filteredItems[index]
+    elseif type(item) == "table" then
+        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
     elseif type(item) == "string" then
         itemName = item
     end
