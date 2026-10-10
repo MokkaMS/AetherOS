@@ -190,7 +190,12 @@ function db.scanStorage()
     local newItems = {}
     local totalItemCount = 0
 
-    for _, chestName in ipairs(db.storageChests) do
+    for i, chestName in ipairs(db.storageChests) do
+        -- Yield periodically during large chest scans to prevent UI freezing
+        if i % 20 == 0 and coroutine.running() then
+            os.sleep(0)
+        end
+
         local p = peripheral.wrap(chestName)
         if p and p.list then
             local ok, list = pcall(p.list)
@@ -199,17 +204,11 @@ function db.scanStorage()
                     if item and item.name and item.count > 0 then
                         local key = item.name
                         if not newItems[key] then
-                            -- Try getting detailed info for maxStackSize / displayName if available
-                            local detail = nil
-                            if p.getItemDetail then
-                                ok, detail = pcall(p.getItemDetail, slot)
-                            end
-                            
                             newItems[key] = {
                                 name = item.name,
-                                displayName = formatDisplayName(item.name, detail),
+                                displayName = formatDisplayName(item.name, nil),
                                 total = 0,
-                                maxCount = (detail and detail.maxCount) or 64,
+                                maxCount = 64,
                                 locations = {}
                             }
                         end
@@ -229,7 +228,7 @@ function db.scanStorage()
 
     db.items = newItems
 
-    -- Rebuild flat array list for Basalt UI sorting and filtering
+    -- Rebuild flat array list for Basalt UI, sorted by quantity descending
     local indexArray = {}
     for _, itemData in pairs(db.items) do
         table.insert(indexArray, {
@@ -241,7 +240,10 @@ function db.scanStorage()
     end
 
     table.sort(indexArray, function(a, b)
-        return a.displayName:lower() < b.displayName:lower()
+        if a.total == b.total then
+            return a.displayName:lower() < b.displayName:lower()
+        end
+        return a.total > b.total
     end)
 
     db.itemIndex = indexArray
@@ -308,7 +310,7 @@ function db.findNearestIOChest(playerPos, requiredRole)
 end
 
 -- Withdraw specified amount of item to a target IO chest
-function db.withdraw(itemName, count, targetIOChest)
+function db.withdraw(itemName, count, targetIOChest, skipRescan)
     if not itemName or not count or count <= 0 then
         return 0, "Invalid item request arguments"
     end
@@ -344,11 +346,37 @@ function db.withdraw(itemName, count, targetIOChest)
         end
     end
 
-    -- Re-scan after transfer to ensure index accuracy
-    db.scanStorage()
+    -- Re-scan after transfer if not skipped
+    if not skipRescan then
+        db.scanStorage()
+    end
 
     db.addLog(string.format("Withdrew %d x %s to %s", amountMoved, itemData.displayName, targetIOChest), "withdraw")
     return amountMoved, nil
+end
+
+-- Withdraw multiple selected items in a single pass
+function db.withdrawMulti(requests, targetIOChest)
+    if not requests or #requests == 0 then
+        return 0, "No items selected for withdrawal"
+    end
+    if not targetIOChest or not peripheral.isPresent(targetIOChest) then
+        return 0, "Target IO chest not available"
+    end
+
+    local totalMoved = 0
+    for _, req in ipairs(requests) do
+        if req.item then
+            local qty = req.all and (db.items[req.item] and db.items[req.item].total or 0) or (req.count or 64)
+            if qty > 0 then
+                local moved, _ = db.withdraw(req.item, qty, targetIOChest, true)
+                totalMoved = totalMoved + moved
+            end
+        end
+    end
+
+    db.scanStorage()
+    return totalMoved, nil
 end
 
 -- Deposit items from an IO chest into storage chests
@@ -796,15 +824,41 @@ local itemsFrame = contentFrame:addFrame()
 
 local searchInput = itemsFrame:addInput()
     :setPosition(1, 1)
-    :setSize(termW - 14, 1)
+    :setSize(termW - 25, 1)
 searchInput.placeholder = "Search items..."
 
-local rescanBtn = itemsFrame:addButton()
-    :setPosition(termW - 12, 1)
+local autoCompleteBtn = itemsFrame:addButton()
+    :setPosition(termW - 24, 1)
     :setSize(12, 1)
+    :setText("TabComplete")
+    :setBackground(colors.purple)
+    :setForeground(colors.white)
+
+local rescanBtn = itemsFrame:addButton()
+    :setPosition(termW - 11, 1)
+    :setSize(11, 1)
     :setText("Refresh")
     :setBackground(colors.green)
     :setForeground(colors.white)
+
+local selectAllBtn = itemsFrame:addButton()
+    :setPosition(1, 2)
+    :setSize(11, 1)
+    :setText("Select All")
+    :setBackground(colors.cyan)
+    :setForeground(colors.black)
+
+local clearSelBtn = itemsFrame:addButton()
+    :setPosition(13, 2)
+    :setSize(11, 1)
+    :setText("Clear Sel")
+    :setBackground(colors.gray)
+    :setForeground(colors.white)
+
+local autoCompleteHint = itemsFrame:addLabel()
+    :setPosition(25, 2)
+    :setForeground(colors.yellow)
+autoCompleteHint.text = ""
 
 local itemList = itemsFrame:addList()
     :setPosition(1, 3)
@@ -819,36 +873,100 @@ local withdrawBox = itemsFrame:addFrame()
 
 local withdrawQtyInput = withdrawBox:addInput()
     :setPosition(1, 1)
-    :setSize(8, 1)
+    :setSize(6, 1)
 withdrawQtyInput.text = "64"
 
-local withdrawBtn = withdrawBox:addButton()
-    :setPosition(10, 1)
-    :setSize(22, 1)
-    :setText("Withdraw to Closest IO")
-    :setBackground(colors.orange)
+local pullAllMode = false
 
-local selectedItemName = nil
+local pullAllBtn = withdrawBox:addButton()
+    :setPosition(8, 1)
+    :setSize(10, 1)
+    :setText("PULL: QTY")
+    :setBackground(colors.blue)
+    :setForeground(colors.white)
+
+local withdrawBtn = withdrawBox:addButton()
+    :setPosition(19, 1)
+    :setSize(math.max(1, termW - 19), 1)
+    :setText("Withdraw Selection (0)")
+    :setBackground(colors.orange)
+    :setForeground(colors.white)
+
+local selectedItems = {}
+local currentAutoMatch = nil
+
+local function getSelectedCount()
+    local count = 0
+    for _, sel in pairs(selectedItems) do
+        if sel then count = count + 1 end
+    end
+    return count
+end
+
+local function updateWithdrawButtonText()
+    local count = getSelectedCount()
+    if count == 0 then
+        withdrawBtn:setText("Withdraw Selection (0)")
+    else
+        withdrawBtn:setText(string.format("Withdraw Sel (%d items)", count))
+    end
+end
+
+local function updateAutoComplete(filterText)
+    currentAutoMatch = nil
+    filterText = (filterText or ""):lower()
+    if filterText ~= "" then
+        for _, item in ipairs(db.itemIndex) do
+            if item.displayName:lower():find(filterText, 1, true) == 1 or item.name:lower():find(filterText, 1, true) == 1 then
+                currentAutoMatch = item
+                break
+            end
+        end
+        if not currentAutoMatch then
+            for _, item in ipairs(db.itemIndex) do
+                if item.displayName:lower():find(filterText, 1, true) or item.name:lower():find(filterText, 1, true) then
+                    currentAutoMatch = item
+                    break
+                end
+            end
+        end
+    end
+
+    if currentAutoMatch then
+        autoCompleteHint.text = "Auto: " .. currentAutoMatch.displayName
+    else
+        autoCompleteHint.text = ""
+    end
+end
 
 local function populateItemList(filter)
     itemList:clear()
-    selectedItemName = nil
     filter = filter and filter:lower() or ""
     
     for _, item in ipairs(db.itemIndex) do
         if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
-            local entryText = string.format("%-28s x%d", item.displayName, item.total)
+            local isSel = selectedItems[item.name]
+            local prefix = isSel and "[x] " or "[ ] "
+            local entryText = string.format("%s%-24s x%d", prefix, item.displayName, item.total)
             itemList:addItem({ text = entryText, value = item.name, name = item.name })
         end
     end
     updateStatsDisplay()
+    updateWithdrawButtonText()
+    updateAutoComplete(filter)
 end
 
 itemList:onSelect(function(self, item, index)
+    local itemName = nil
     if type(item) == "table" then
-        selectedItemName = item.value or item.name
+        itemName = item.value or item.name
     elseif type(item) == "string" then
-        selectedItemName = item
+        itemName = item
+    end
+
+    if itemName then
+        selectedItems[itemName] = not selectedItems[itemName]
+        populateItemList(searchInput.text or searchInput.value or "")
     end
 end)
 
@@ -856,31 +974,72 @@ searchInput:onChange(function(self, text)
     populateItemList(text or searchInput.text or searchInput.value or "")
 end)
 
+autoCompleteBtn:onClick(function()
+    if currentAutoMatch then
+        searchInput.text = currentAutoMatch.displayName
+        populateItemList(currentAutoMatch.displayName)
+    end
+end)
+
+selectAllBtn:onClick(function()
+    local filter = (searchInput.text or searchInput.value or ""):lower()
+    for _, item in ipairs(db.itemIndex) do
+        if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
+            selectedItems[item.name] = true
+        end
+    end
+    populateItemList(filter)
+end)
+
+clearSelBtn:onClick(function()
+    selectedItems = {}
+    populateItemList(searchInput.text or searchInput.value or "")
+end)
+
+pullAllBtn:onClick(function()
+    pullAllMode = not pullAllMode
+    if pullAllMode then
+        pullAllBtn:setText("PULL: ALL"):setBackground(colors.purple)
+    else
+        pullAllBtn:setText("PULL: QTY"):setBackground(colors.blue)
+    end
+end)
+
 rescanBtn:onClick(function()
+    db.addLog("Refreshing storage index...", "info")
     db.scanStorage()
     populateItemList(searchInput.text or searchInput.value or "")
-    db.addLog("Manual index refresh triggered.", "info")
+    db.addLog("Storage index updated.", "info")
 end)
 
 withdrawBtn:onClick(function()
-    if not selectedItemName then
-        db.addLog("Select an item from the list first!", "warning")
+    local requests = {}
+    local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
+    local count = tonumber(rawVal) or 64
+
+    for name, sel in pairs(selectedItems) do
+        if sel then
+            table.insert(requests, { item = name, count = count, all = pullAllMode })
+        end
+    end
+
+    if #requests == 0 then
+        db.addLog("Select one or more items from the list first!", "warning")
         return
     end
 
-    local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
-    local count = tonumber(rawVal) or 64
-    
     local nearestIO, dist, info = db.findNearestIOChest(nil, "output")
     if not nearestIO then
         db.addLog("No IO chest available for withdrawal!", "error")
         return
     end
 
-    local moved, err = db.withdraw(selectedItemName, count, nearestIO)
+    local moved, err = db.withdrawMulti(requests, nearestIO)
     if err then
         db.addLog("Withdraw error: " .. err, "error")
     else
+        db.addLog(string.format("Multi-withdraw complete: moved %d total items.", moved), "info")
+        selectedItems = {}
         populateItemList(searchInput.text or searchInput.value or "")
     end
 end)
@@ -1142,7 +1301,9 @@ end
 local serverId = nil
 local playerPos = nil
 local currentItems = {}
-local selectedItemName = nil
+local selectedItems = {}
+local pullAllMode = false
+local currentAutoMatch = nil
 
 local mainFrame = (basalt.getMainFrame and basalt.getMainFrame()) or basalt.createFrame()
 mainFrame:setSize(26, 20):setBackground(colors.black)
@@ -1163,10 +1324,17 @@ gpsLabel.text = " GPS: Locating..."
 
 local searchInput = mainFrame:addInput()
     :setPosition(1, 3)
-    :setSize(26, 1)
+    :setSize(18, 1)
     :setBackground(colors.white)
     :setForeground(colors.black)
-searchInput.placeholder = " Search items..."
+searchInput.placeholder = " Search..."
+
+local autoBtn = mainFrame:addButton()
+    :setPosition(19, 3)
+    :setSize(8, 1)
+    :setText("Auto")
+    :setBackground(colors.purple)
+    :setForeground(colors.white)
 
 local itemList = mainFrame:addList()
     :setPosition(1, 4)
@@ -1180,48 +1348,55 @@ local qtyLabel = mainFrame:addLabel()
 qtyLabel.text = "Qty:"
 
 local qtyInput = mainFrame:addInput()
-    :setPosition(6, 13)
-    :setSize(6, 1)
+    :setPosition(5, 13)
+    :setSize(5, 1)
     :setBackground(colors.white)
     :setForeground(colors.black)
 qtyInput.text = "64"
 
-local preset16Btn = mainFrame:addButton()
-    :setPosition(13, 13)
-    :setSize(6, 1)
-    :setText("x16")
-    :setBackground(colors.cyan)
+local pullAllBtn = mainFrame:addButton()
+    :setPosition(11, 13)
+    :setSize(5, 1)
+    :setText("ALL")
+    :setBackground(colors.blue)
     :setForeground(colors.white)
 
-local preset64Btn = mainFrame:addButton()
-    :setPosition(20, 13)
-    :setSize(6, 1)
-    :setText("x64")
+local selectAllBtn = mainFrame:addButton()
+    :setPosition(17, 13)
+    :setSize(5, 1)
+    :setText("Sel*")
     :setBackground(colors.cyan)
+    :setForeground(colors.black)
+
+local clearSelBtn = mainFrame:addButton()
+    :setPosition(23, 13)
+    :setSize(4, 1)
+    :setText("Clr")
+    :setBackground(colors.gray)
     :setForeground(colors.white)
 
 local withdrawBtn = mainFrame:addButton()
-    :setPosition(1, 15)
+    :setPosition(1, 14)
     :setSize(26, 1)
-    :setText("Withdraw (Nearest IO)")
+    :setText("Withdraw Selection (0)")
     :setBackground(colors.orange)
     :setForeground(colors.white)
 
 local depositBtn = mainFrame:addButton()
-    :setPosition(1, 16)
+    :setPosition(1, 15)
     :setSize(26, 1)
     :setText("Deposit Here (Nearest IO)")
     :setBackground(colors.green)
     :setForeground(colors.white)
 
 local statusLabel = mainFrame:addLabel()
-    :setPosition(1, 17)
+    :setPosition(1, 16)
     :setSize(26, 2)
     :setForeground(colors.yellow)
 statusLabel.text = " Connecting to network..."
 
 local refreshBtn = mainFrame:addButton()
-    :setPosition(1, 19)
+    :setPosition(1, 18)
     :setSize(26, 1)
     :setText("Refresh Server & GPS")
     :setBackground(colors.gray)
@@ -1236,6 +1411,52 @@ local function updateGPS()
         playerPos = nil
         gpsLabel.text = " GPS: Signal Unavailable"
     end
+end
+
+local function getSelectedCount()
+    local count = 0
+    for _, sel in pairs(selectedItems) do
+        if sel then count = count + 1 end
+    end
+    return count
+end
+
+local function updateWithdrawButtonText()
+    local count = getSelectedCount()
+    if count == 0 then
+        withdrawBtn:setText("Withdraw Selection (0)")
+    else
+        withdrawBtn:setText(string.format("Withdraw Sel (%d items)", count))
+    end
+end
+
+local function updateAutoComplete(filterText)
+    currentAutoMatch = nil
+    filterText = (filterText or ""):lower()
+    if filterText ~= "" then
+        for _, item in ipairs(currentItems) do
+            if item.displayName:lower():find(filterText, 1, true) == 1 or item.name:lower():find(filterText, 1, true) == 1 then
+                currentAutoMatch = item
+                break
+            end
+        end
+    end
+end
+
+local function populateList()
+    itemList:clear()
+    local filter = (searchInput.text or searchInput.value or ""):lower()
+    updateAutoComplete(filter)
+
+    for _, item in ipairs(currentItems) do
+        if filter == "" or item.displayName:lower():find(filter, 1, true) then
+            local isSel = selectedItems[item.name]
+            local prefix = isSel and "[x]" or "[ ]"
+            local entryText = string.format("%s %-12s x%d", prefix, item.displayName:sub(1, 11), item.total)
+            itemList:addItem({ text = entryText, value = item.name, name = item.name })
+        end
+    end
+    updateWithdrawButtonText()
 end
 
 local function fetchItems()
@@ -1255,16 +1476,12 @@ local function fetchItems()
     local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 2.5)
     if ok and res.success and res.items then
         currentItems = res.items
-        itemList:clear()
-        selectedItemName = nil
-        local filter = (searchInput.text or searchInput.value or (searchInput.getValue and searchInput:getValue()) or ""):lower()
-        
-        for _, item in ipairs(currentItems) do
-            if filter == "" or item.displayName:lower():find(filter, 1, true) then
-                local entryText = string.format("%-15s x%d", item.displayName:sub(1, 14), item.total)
-                itemList:addItem({ text = entryText, value = item.name, name = item.name })
-            end
-        end
+        -- Ensure items are sorted by total quantity descending
+        table.sort(currentItems, function(a, b)
+            if a.total == b.total then return a.displayName:lower() < b.displayName:lower() end
+            return a.total > b.total
+        end)
+        populateList()
         statusLabel.text = " Connected: " .. #currentItems .. " item types"
     else
         serverId = nil
@@ -1273,59 +1490,86 @@ local function fetchItems()
 end
 
 itemList:onSelect(function(self, item, index)
+    local itemName = nil
     if type(item) == "table" then
-        selectedItemName = item.value or item.name
+        itemName = item.value or item.name
     elseif type(item) == "string" then
-        selectedItemName = item
+        itemName = item
+    end
+
+    if itemName then
+        selectedItems[itemName] = not selectedItems[itemName]
+        populateList()
     end
 end)
 
 searchInput:onChange(function(self, text)
-    itemList:clear()
-    selectedItemName = nil
-    text = (text or searchInput.text or searchInput.value or ""):lower()
-    for _, item in ipairs(currentItems) do
-        if text == "" or item.displayName:lower():find(text, 1, true) then
-            local entryText = string.format("%-15s x%d", item.displayName:sub(1, 14), item.total)
-            itemList:addItem({ text = entryText, value = item.name, name = item.name })
-        end
+    populateList()
+end)
+
+autoBtn:onClick(function()
+    if currentAutoMatch then
+        searchInput.text = currentAutoMatch.displayName
+        populateList()
     end
 end)
 
-preset16Btn:onClick(function()
-    qtyInput.text = "16"
-    if qtyInput.setValue then pcall(function() qtyInput:setValue("16") end) end
+pullAllBtn:onClick(function()
+    pullAllMode = not pullAllMode
+    if pullAllMode then
+        pullAllBtn:setText("ALL!"):setBackground(colors.purple)
+    else
+        pullAllBtn:setText("ALL"):setBackground(colors.blue)
+    end
 end)
-preset64Btn:onClick(function()
-    qtyInput.text = "64"
-    if qtyInput.setValue then pcall(function() qtyInput:setValue("64") end) end
+
+selectAllBtn:onClick(function()
+    local filter = (searchInput.text or searchInput.value or ""):lower()
+    for _, item in ipairs(currentItems) do
+        if filter == "" or item.displayName:lower():find(filter, 1, true) then
+            selectedItems[item.name] = true
+        end
+    end
+    populateList()
+end)
+
+clearSelBtn:onClick(function()
+    selectedItems = {}
+    populateList()
 end)
 
 withdrawBtn:onClick(function()
-    if not selectedItemName then
-        statusLabel.text = " Select an item first!"
-        return
+    local requests = {}
+    local rawVal = qtyInput.text or qtyInput.value or "64"
+    local count = tonumber(rawVal) or 64
+
+    for name, sel in pairs(selectedItems) do
+        if sel then
+            table.insert(requests, { item = name, count = count, all = pullAllMode })
+        end
     end
 
-    local rawVal = qtyInput.text or qtyInput.value or (qtyInput.getValue and qtyInput:getValue()) or "64"
-    local count = tonumber(rawVal) or 64
+    if #requests == 0 then
+        statusLabel.text = " Select item(s) first!"
+        return
+    end
 
     if not serverId then
         fetchItems()
         if not serverId then return end
     end
 
-    statusLabel.text = " Sending withdraw request..."
+    statusLabel.text = " Withdrawing selection..."
     local payload = {
-        item = selectedItemName,
-        count = count,
+        requests = requests,
         gpsPos = playerPos
     }
 
-    local ok, res = net.sendRequest(serverId, "WITHDRAW_ITEM", payload, 3)
+    local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 4)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
         statusLabel.text = string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr)
+        selectedItems = {}
         fetchItems()
     else
         statusLabel.text = " Error: " .. (res and res.message or "Timeout")

@@ -76,7 +76,12 @@ function db.scanStorage()
     local newItems = {}
     local totalItemCount = 0
 
-    for _, chestName in ipairs(db.storageChests) do
+    for i, chestName in ipairs(db.storageChests) do
+        -- Yield periodically during large chest scans to prevent UI freezing
+        if i % 20 == 0 and coroutine.running() then
+            os.sleep(0)
+        end
+
         local p = peripheral.wrap(chestName)
         if p and p.list then
             local ok, list = pcall(p.list)
@@ -85,17 +90,11 @@ function db.scanStorage()
                     if item and item.name and item.count > 0 then
                         local key = item.name
                         if not newItems[key] then
-                            -- Try getting detailed info for maxStackSize / displayName if available
-                            local detail = nil
-                            if p.getItemDetail then
-                                ok, detail = pcall(p.getItemDetail, slot)
-                            end
-                            
                             newItems[key] = {
                                 name = item.name,
-                                displayName = formatDisplayName(item.name, detail),
+                                displayName = formatDisplayName(item.name, nil),
                                 total = 0,
-                                maxCount = (detail and detail.maxCount) or 64,
+                                maxCount = 64,
                                 locations = {}
                             }
                         end
@@ -115,7 +114,7 @@ function db.scanStorage()
 
     db.items = newItems
 
-    -- Rebuild flat array list for Basalt UI sorting and filtering
+    -- Rebuild flat array list for Basalt UI, sorted by quantity descending
     local indexArray = {}
     for _, itemData in pairs(db.items) do
         table.insert(indexArray, {
@@ -127,7 +126,10 @@ function db.scanStorage()
     end
 
     table.sort(indexArray, function(a, b)
-        return a.displayName:lower() < b.displayName:lower()
+        if a.total == b.total then
+            return a.displayName:lower() < b.displayName:lower()
+        end
+        return a.total > b.total
     end)
 
     db.itemIndex = indexArray
@@ -194,7 +196,7 @@ function db.findNearestIOChest(playerPos, requiredRole)
 end
 
 -- Withdraw specified amount of item to a target IO chest
-function db.withdraw(itemName, count, targetIOChest)
+function db.withdraw(itemName, count, targetIOChest, skipRescan)
     if not itemName or not count or count <= 0 then
         return 0, "Invalid item request arguments"
     end
@@ -230,11 +232,37 @@ function db.withdraw(itemName, count, targetIOChest)
         end
     end
 
-    -- Re-scan after transfer to ensure index accuracy
-    db.scanStorage()
+    -- Re-scan after transfer if not skipped
+    if not skipRescan then
+        db.scanStorage()
+    end
 
     db.addLog(string.format("Withdrew %d x %s to %s", amountMoved, itemData.displayName, targetIOChest), "withdraw")
     return amountMoved, nil
+end
+
+-- Withdraw multiple selected items in a single pass
+function db.withdrawMulti(requests, targetIOChest)
+    if not requests or #requests == 0 then
+        return 0, "No items selected for withdrawal"
+    end
+    if not targetIOChest or not peripheral.isPresent(targetIOChest) then
+        return 0, "Target IO chest not available"
+    end
+
+    local totalMoved = 0
+    for _, req in ipairs(requests) do
+        if req.item then
+            local qty = req.all and (db.items[req.item] and db.items[req.item].total or 0) or (req.count or 64)
+            if qty > 0 then
+                local moved, _ = db.withdraw(req.item, qty, targetIOChest, true)
+                totalMoved = totalMoved + moved
+            end
+        end
+    end
+
+    db.scanStorage()
+    return totalMoved, nil
 end
 
 -- Deposit items from an IO chest into storage chests

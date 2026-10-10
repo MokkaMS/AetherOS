@@ -106,15 +106,41 @@ local itemsFrame = contentFrame:addFrame()
 
 local searchInput = itemsFrame:addInput()
     :setPosition(1, 1)
-    :setSize(termW - 14, 1)
+    :setSize(termW - 25, 1)
 searchInput.placeholder = "Search items..."
 
-local rescanBtn = itemsFrame:addButton()
-    :setPosition(termW - 12, 1)
+local autoCompleteBtn = itemsFrame:addButton()
+    :setPosition(termW - 24, 1)
     :setSize(12, 1)
+    :setText("TabComplete")
+    :setBackground(colors.purple)
+    :setForeground(colors.white)
+
+local rescanBtn = itemsFrame:addButton()
+    :setPosition(termW - 11, 1)
+    :setSize(11, 1)
     :setText("Refresh")
     :setBackground(colors.green)
     :setForeground(colors.white)
+
+local selectAllBtn = itemsFrame:addButton()
+    :setPosition(1, 2)
+    :setSize(11, 1)
+    :setText("Select All")
+    :setBackground(colors.cyan)
+    :setForeground(colors.black)
+
+local clearSelBtn = itemsFrame:addButton()
+    :setPosition(13, 2)
+    :setSize(11, 1)
+    :setText("Clear Sel")
+    :setBackground(colors.gray)
+    :setForeground(colors.white)
+
+local autoCompleteHint = itemsFrame:addLabel()
+    :setPosition(25, 2)
+    :setForeground(colors.yellow)
+autoCompleteHint.text = ""
 
 local itemList = itemsFrame:addList()
     :setPosition(1, 3)
@@ -129,36 +155,100 @@ local withdrawBox = itemsFrame:addFrame()
 
 local withdrawQtyInput = withdrawBox:addInput()
     :setPosition(1, 1)
-    :setSize(8, 1)
+    :setSize(6, 1)
 withdrawQtyInput.text = "64"
 
-local withdrawBtn = withdrawBox:addButton()
-    :setPosition(10, 1)
-    :setSize(22, 1)
-    :setText("Withdraw to Closest IO")
-    :setBackground(colors.orange)
+local pullAllMode = false
 
-local selectedItemName = nil
+local pullAllBtn = withdrawBox:addButton()
+    :setPosition(8, 1)
+    :setSize(10, 1)
+    :setText("PULL: QTY")
+    :setBackground(colors.blue)
+    :setForeground(colors.white)
+
+local withdrawBtn = withdrawBox:addButton()
+    :setPosition(19, 1)
+    :setSize(math.max(1, termW - 19), 1)
+    :setText("Withdraw Selection (0)")
+    :setBackground(colors.orange)
+    :setForeground(colors.white)
+
+local selectedItems = {}
+local currentAutoMatch = nil
+
+local function getSelectedCount()
+    local count = 0
+    for _, sel in pairs(selectedItems) do
+        if sel then count = count + 1 end
+    end
+    return count
+end
+
+local function updateWithdrawButtonText()
+    local count = getSelectedCount()
+    if count == 0 then
+        withdrawBtn:setText("Withdraw Selection (0)")
+    else
+        withdrawBtn:setText(string.format("Withdraw Sel (%d items)", count))
+    end
+end
+
+local function updateAutoComplete(filterText)
+    currentAutoMatch = nil
+    filterText = (filterText or ""):lower()
+    if filterText ~= "" then
+        for _, item in ipairs(db.itemIndex) do
+            if item.displayName:lower():find(filterText, 1, true) == 1 or item.name:lower():find(filterText, 1, true) == 1 then
+                currentAutoMatch = item
+                break
+            end
+        end
+        if not currentAutoMatch then
+            for _, item in ipairs(db.itemIndex) do
+                if item.displayName:lower():find(filterText, 1, true) or item.name:lower():find(filterText, 1, true) then
+                    currentAutoMatch = item
+                    break
+                end
+            end
+        end
+    end
+
+    if currentAutoMatch then
+        autoCompleteHint.text = "Auto: " .. currentAutoMatch.displayName
+    else
+        autoCompleteHint.text = ""
+    end
+end
 
 local function populateItemList(filter)
     itemList:clear()
-    selectedItemName = nil
     filter = filter and filter:lower() or ""
     
     for _, item in ipairs(db.itemIndex) do
         if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
-            local entryText = string.format("%-28s x%d", item.displayName, item.total)
+            local isSel = selectedItems[item.name]
+            local prefix = isSel and "[x] " or "[ ] "
+            local entryText = string.format("%s%-24s x%d", prefix, item.displayName, item.total)
             itemList:addItem({ text = entryText, value = item.name, name = item.name })
         end
     end
     updateStatsDisplay()
+    updateWithdrawButtonText()
+    updateAutoComplete(filter)
 end
 
 itemList:onSelect(function(self, item, index)
+    local itemName = nil
     if type(item) == "table" then
-        selectedItemName = item.value or item.name
+        itemName = item.value or item.name
     elseif type(item) == "string" then
-        selectedItemName = item
+        itemName = item
+    end
+
+    if itemName then
+        selectedItems[itemName] = not selectedItems[itemName]
+        populateItemList(searchInput.text or searchInput.value or "")
     end
 end)
 
@@ -166,31 +256,72 @@ searchInput:onChange(function(self, text)
     populateItemList(text or searchInput.text or searchInput.value or "")
 end)
 
+autoCompleteBtn:onClick(function()
+    if currentAutoMatch then
+        searchInput.text = currentAutoMatch.displayName
+        populateItemList(currentAutoMatch.displayName)
+    end
+end)
+
+selectAllBtn:onClick(function()
+    local filter = (searchInput.text or searchInput.value or ""):lower()
+    for _, item in ipairs(db.itemIndex) do
+        if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) then
+            selectedItems[item.name] = true
+        end
+    end
+    populateItemList(filter)
+end)
+
+clearSelBtn:onClick(function()
+    selectedItems = {}
+    populateItemList(searchInput.text or searchInput.value or "")
+end)
+
+pullAllBtn:onClick(function()
+    pullAllMode = not pullAllMode
+    if pullAllMode then
+        pullAllBtn:setText("PULL: ALL"):setBackground(colors.purple)
+    else
+        pullAllBtn:setText("PULL: QTY"):setBackground(colors.blue)
+    end
+end)
+
 rescanBtn:onClick(function()
+    db.addLog("Refreshing storage index...", "info")
     db.scanStorage()
     populateItemList(searchInput.text or searchInput.value or "")
-    db.addLog("Manual index refresh triggered.", "info")
+    db.addLog("Storage index updated.", "info")
 end)
 
 withdrawBtn:onClick(function()
-    if not selectedItemName then
-        db.addLog("Select an item from the list first!", "warning")
+    local requests = {}
+    local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
+    local count = tonumber(rawVal) or 64
+
+    for name, sel in pairs(selectedItems) do
+        if sel then
+            table.insert(requests, { item = name, count = count, all = pullAllMode })
+        end
+    end
+
+    if #requests == 0 then
+        db.addLog("Select one or more items from the list first!", "warning")
         return
     end
 
-    local rawVal = withdrawQtyInput.text or withdrawQtyInput.value or (withdrawQtyInput.getValue and withdrawQtyInput:getValue()) or "64"
-    local count = tonumber(rawVal) or 64
-    
     local nearestIO, dist, info = db.findNearestIOChest(nil, "output")
     if not nearestIO then
         db.addLog("No IO chest available for withdrawal!", "error")
         return
     end
 
-    local moved, err = db.withdraw(selectedItemName, count, nearestIO)
+    local moved, err = db.withdrawMulti(requests, nearestIO)
     if err then
         db.addLog("Withdraw error: " .. err, "error")
     else
+        db.addLog(string.format("Multi-withdraw complete: moved %d total items.", moved), "info")
+        selectedItems = {}
         populateItemList(searchInput.text or searchInput.value or "")
     end
 end)
