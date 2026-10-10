@@ -215,7 +215,9 @@ local function main()
         elseif choice == "4" then
             local db = require("db")
             drawHeader()
-            print("Scanning & performing test deposit...")
+            print("Scanning storage network...")
+            db.scanStorage()
+            print("Performing test deposit from IO chests...")
             local count, err = db.depositAllIO()
             if err then
                 term.setTextColor(colors.red)

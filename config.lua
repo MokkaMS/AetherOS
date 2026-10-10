@@ -58,10 +58,12 @@ function config.removeIOChest(peripheralName)
 end
 
 function config.getIOChests()
+    config.load()
     return config.data.ioChests
 end
 
 function config.isIOChest(peripheralName)
+    config.load()
     return config.data.ioChests[peripheralName] ~= nil
 end
 

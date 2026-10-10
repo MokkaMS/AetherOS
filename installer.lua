@@ -99,10 +99,12 @@ function config.removeIOChest(peripheralName)
 end
 
 function config.getIOChests()
+    config.load()
     return config.data.ioChests
 end
 
 function config.isIOChest(peripheralName)
+    config.load()
     return config.data.ioChests[peripheralName] ~= nil
 end
 
@@ -385,6 +387,11 @@ function db.deposit(sourceIOChest)
         return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
     end
 
+    -- Ensure storage peripherals are discovered if not yet loaded
+    if #db.storageChests == 0 then
+        db.discoverPeripherals()
+    end
+
     local sourceP = peripheral.wrap(sourceIOChest)
     if not sourceP or not sourceP.list then
         return 0, "Cannot access source IO chest"
@@ -406,13 +413,25 @@ function db.deposit(sourceIOChest)
             if existingData and existingData.locations then
                 for _, loc in ipairs(existingData.locations) do
                     if remaining <= 0 then break end
-                    local destP = peripheral.wrap(loc.chest)
-                    if destP and destP.pullItems then
-                        local pok, moved = pcall(destP.pullItems, sourceIOChest, slot, remaining, loc.slot)
-                        if pok and moved and moved > 0 then
-                            remaining = remaining - moved
-                            totalDeposited = totalDeposited + moved
+                    
+                    -- Try push from source IO chest first
+                    local moved = 0
+                    if sourceP and sourceP.pushItems then
+                        local pok, res = pcall(sourceP.pushItems, loc.chest, slot, remaining, loc.slot)
+                        if pok and res and res > 0 then moved = res end
+                    end
+                    -- Fallback to pull from destination storage chest
+                    if moved == 0 then
+                        local destP = peripheral.wrap(loc.chest)
+                        if destP and destP.pullItems then
+                            local pok, res = pcall(destP.pullItems, sourceIOChest, slot, remaining, loc.slot)
+                            if pok and res and res > 0 then moved = res end
                         end
+                    end
+
+                    if moved > 0 then
+                        remaining = remaining - moved
+                        totalDeposited = totalDeposited + moved
                     end
                 end
             end
@@ -421,13 +440,23 @@ function db.deposit(sourceIOChest)
             if remaining > 0 then
                 for _, chestName in ipairs(db.storageChests) do
                     if remaining <= 0 then break end
-                    local destP = peripheral.wrap(chestName)
-                    if destP and destP.pullItems then
-                        local pok, moved = pcall(destP.pullItems, sourceIOChest, slot, remaining)
-                        if pok and moved and moved > 0 then
-                            remaining = remaining - moved
-                            totalDeposited = totalDeposited + moved
+                    
+                    local moved = 0
+                    if sourceP and sourceP.pushItems then
+                        local pok, res = pcall(sourceP.pushItems, chestName, slot, remaining)
+                        if pok and res and res > 0 then moved = res end
+                    end
+                    if moved == 0 then
+                        local destP = peripheral.wrap(chestName)
+                        if destP and destP.pullItems then
+                            local pok, res = pcall(destP.pullItems, sourceIOChest, slot, remaining)
+                            if pok and res and res > 0 then moved = res end
                         end
+                    end
+
+                    if moved > 0 then
+                        remaining = remaining - moved
+                        totalDeposited = totalDeposited + moved
                     end
                 end
             end
@@ -770,7 +799,9 @@ local function main()
         elseif choice == "4" then
             local db = require("db")
             drawHeader()
-            print("Scanning & performing test deposit...")
+            print("Scanning storage network...")
+            db.scanStorage()
+            print("Performing test deposit from IO chests...")
             local count, err = db.depositAllIO()
             if err then
                 term.setTextColor(colors.red)
