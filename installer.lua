@@ -1,5 +1,6 @@
--- Automatic Installer & Dependency Downloader for CC:Tweaked ME System
-local BASALT_URL = "https://basalt.madefor.cc/basalt.lua"
+-- Automatic Installer & Dependency Downloader for AetherVault OS (CC:Tweaked)
+local BASALT_INSTALL_URL = "https://basalt.madefor.cc/2.5/install.lua"
+local BASALT_RAW_URL = "https://raw.githubusercontent.com/Pyroxenium/Basalt2/refs/heads/basalt2.5/bundle/basalt.min.lua"
 
 term.clear()
 term.setCursorPos(1, 1)
@@ -26,22 +27,32 @@ end
 -- Download Basalt v2.5 if missing
 if not fs.exists("basalt.lua") then
     term.setTextColor(colors.cyan)
-    write("Downloading Basalt v2.5 framework...")
-    local resp, err = http.get(BASALT_URL)
-    if resp then
-        local code = resp.readAll()
-        resp.close()
-        local file = fs.open("basalt.lua", "w")
-        file.write(code)
-        file.close()
-        term.setTextColor(colors.green)
-        print(" [OK]")
-    else
-        term.setTextColor(colors.red)
-        print(" [FAILED]")
-        print("Could not download Basalt from " .. BASALT_URL)
-        print("Error: " .. tostring(err))
-        return
+    print("Downloading Basalt v2.5 framework...")
+    
+    -- Attempt 1: Run official Basalt 2.5 installer script
+    local success = pcall(function()
+        shell.run("wget", "run", BASALT_INSTALL_URL, "minified")
+    end)
+
+    -- Attempt 2: Direct URL download if Attempt 1 didn't produce basalt.lua
+    if not fs.exists("basalt.lua") then
+        write("Fallback: Fetching raw Basalt bundle...")
+        local resp, err = http.get(BASALT_RAW_URL)
+        if resp then
+            local code = resp.readAll()
+            resp.close()
+            local file = fs.open("basalt.lua", "w")
+            file.write(code)
+            file.close()
+            term.setTextColor(colors.green)
+            print(" [OK]")
+        else
+            term.setTextColor(colors.red)
+            print(" [FAILED]")
+            print("Could not download Basalt from " .. BASALT_RAW_URL)
+            print("Error: " .. tostring(err))
+            return
+        end
     end
 else
     term.setTextColor(colors.green)
