@@ -39,7 +39,7 @@ end
 -- Embedded System Files Backup
 local embeddedFiles = {}
 
-embeddedFiles["config.lua"] = [=[-- Configuration management for AetherVault OS
+embeddedFiles["config.lua"] = [=[-- Configuration management for CC:Tweaked Storage & ME System
 local config = {}
 
 local CONFIG_FILE = "storage_config.json"
@@ -47,10 +47,10 @@ local CONFIG_FILE = "storage_config.json"
 config.data = {
     protocol = "AETHER_VAULT_NET",
     hostname = "aether_vault_server",
-    scanInterval = 5,
-    autoDeposit = true,
-    ioChests = {},
-    ignoredPeripherals = {},
+    scanInterval = 5, -- seconds between automatic inventory scans
+    autoDeposit = true, -- automatically import items placed in IO chests during scan
+    ioChests = {}, -- format: { [peripheralName] = { label = "Main IO", x = 0, y = 64, z = 0, role = "both" } }
+    ignoredPeripherals = {}, -- peripheral names to ignore (e.g., drives, turtle inventories, non-storage)
 }
 
 function config.load()
@@ -88,7 +88,7 @@ function config.setIOChest(peripheralName, label, x, y, z, role)
         x = tonumber(x) or 0,
         y = tonumber(y) or 0,
         z = tonumber(z) or 0,
-        role = role or "both"
+        role = role or "both" -- "input", "output", "both"
     }
     config.save()
 end
@@ -106,20 +106,22 @@ function config.isIOChest(peripheralName)
     return config.data.ioChests[peripheralName] ~= nil
 end
 
+-- Initialize default config on load
 config.load()
+
 return config
 ]=]
 
-embeddedFiles["db.lua"] = [=[-- Database Engine for AetherVault OS
+embeddedFiles["db.lua"] = [=[-- Database and Storage Engine for CC:Tweaked ME System
 local config = require("config")
 
 local db = {}
 
-db.items = {}           
-db.itemIndex = {}       
-db.storageChests = {}   
-db.ioChests = {}        
-db.logs = {}            
+db.items = {}           -- Aggregated item catalog: { [itemName] = { name, displayName, total, maxCount, locations = {...} } }
+db.itemIndex = {}       -- Array list of items for Basalt UI lists: { { name, displayName, total, maxCount }, ... }
+db.storageChests = {}   -- List of peripheral names categorized as storage
+db.ioChests = {}        -- Cached IO chest peripherals
+db.logs = {}            -- Activity log entries for GUI display: { { timestamp, text, type } }
 db.isScanning = false
 
 local MAX_LOGS = 100
@@ -133,16 +135,19 @@ function db.addLog(text, logType)
     end
 end
 
+-- Check if peripheral is an inventory and not ignored
 local function isValidInventory(name)
     if config.data.ignoredPeripherals[name] then
         return false
     end
+    -- Ignore computer/pocket peripherals if they act as inventories
     if name:find("computer") or name:find("turtle") or name:find("drive") then
         return false
     end
     return peripheral.hasType(name, "inventory")
 end
 
+-- Find all connected inventory peripherals on wired modem network
 function db.discoverPeripherals()
     local names = peripheral.getNames()
     local storage = {}
@@ -163,6 +168,7 @@ function db.discoverPeripherals()
     return storage, io
 end
 
+-- Format technical ID to readable display name (e.g. minecraft:iron_ingot -> Iron Ingot)
 local function formatDisplayName(technicalName, itemDetail)
     if itemDetail and itemDetail.displayName then
         return itemDetail.displayName
@@ -174,6 +180,7 @@ local function formatDisplayName(technicalName, itemDetail)
     end)
 end
 
+-- Complete scan of all storage chests and item indexing
 function db.scanStorage()
     if db.isScanning then return false end
     db.isScanning = true
@@ -192,6 +199,7 @@ function db.scanStorage()
                     if item and item.name and item.count > 0 then
                         local key = item.name
                         if not newItems[key] then
+                            -- Try getting detailed info for maxStackSize / displayName if available
                             local detail = nil
                             if p.getItemDetail then
                                 ok, detail = pcall(p.getItemDetail, slot)
@@ -221,6 +229,7 @@ function db.scanStorage()
 
     db.items = newItems
 
+    -- Rebuild flat array list for Basalt UI sorting and filtering
     local indexArray = {}
     for _, itemData in pairs(db.items) do
         table.insert(indexArray, {
@@ -240,6 +249,7 @@ function db.scanStorage()
     return true, #indexArray, totalItemCount
 end
 
+-- Calculate Euclidean distance between two 3D coordinates
 local function calculateDistance(pos1, pos2)
     local dx = (pos1.x or 0) - (pos2.x or 0)
     local dy = (pos1.y or 0) - (pos2.y or 0)
@@ -247,11 +257,14 @@ local function calculateDistance(pos1, pos2)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
+-- Find nearest registered IO chest based on player's GPS position
 function db.findNearestIOChest(playerPos, requiredRole)
     requiredRole = requiredRole or "both"
     local ioConfig = config.getIOChests()
+    
     local candidates = {}
 
+    -- Filter connected & registered IO chests
     for pName, info in pairs(ioConfig) do
         if peripheral.isPresent(pName) then
             if info.role == "both" or info.role == requiredRole or requiredRole == "both" then
@@ -263,13 +276,15 @@ function db.findNearestIOChest(playerPos, requiredRole)
         end
     end
 
+    -- Fallback: If no registered IO chest matches, check any connected IO chest or storage chest fallback
     if #candidates == 0 then
         if #db.ioChests > 0 then
-            return db.ioChests[1], nil
+            return db.ioChests[1], nil -- Return first available IO chest without distance
         end
         return nil, "No connected IO chest found!"
     end
 
+    -- If player position is provided (GPS coordinates)
     if playerPos and playerPos.x and playerPos.y and playerPos.z then
         local nearest = nil
         local minDistance = math.huge
@@ -287,10 +302,12 @@ function db.findNearestIOChest(playerPos, requiredRole)
         end
     end
 
+    -- Default fallback if GPS is not available: return first candidate
     local defaultChest = candidates[1]
     return defaultChest.name, nil, defaultChest.info
 end
 
+-- Withdraw specified amount of item to a target IO chest
 function db.withdraw(itemName, count, targetIOChest)
     if not itemName or not count or count <= 0 then
         return 0, "Invalid item request arguments"
@@ -313,6 +330,7 @@ function db.withdraw(itemName, count, targetIOChest)
         return 0, "Failed to connect to IO chest peripheral"
     end
 
+    -- Move items from storage locations to IO chest
     for _, loc in ipairs(itemData.locations) do
         if amountMoved >= amountNeeded then break end
         
@@ -326,11 +344,14 @@ function db.withdraw(itemName, count, targetIOChest)
         end
     end
 
+    -- Re-scan after transfer to ensure index accuracy
     db.scanStorage()
+
     db.addLog(string.format("Withdrew %d x %s to %s", amountMoved, itemData.displayName, targetIOChest), "withdraw")
     return amountMoved, nil
 end
 
+-- Deposit items from an IO chest into storage chests
 function db.deposit(sourceIOChest)
     if not sourceIOChest or not peripheral.isPresent(sourceIOChest) then
         return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
@@ -352,6 +373,7 @@ function db.deposit(sourceIOChest)
         if item and item.name and item.count > 0 then
             local remaining = item.count
 
+            -- Step 1: Try stacking into existing storage chests containing the same item
             local existingData = db.items[item.name]
             if existingData and existingData.locations then
                 for _, loc in ipairs(existingData.locations) do
@@ -367,6 +389,7 @@ function db.deposit(sourceIOChest)
                 end
             end
 
+            -- Step 2: Put remaining items into any available storage chest slot
             if remaining > 0 then
                 for _, chestName in ipairs(db.storageChests) do
                     if remaining <= 0 then break end
@@ -391,8 +414,10 @@ function db.deposit(sourceIOChest)
     return totalDeposited, nil
 end
 
+-- Deposit from all registered/discovered IO chests
 function db.depositAllIO()
     local grandTotal = 0
+    -- Collect IO chests from both config and auto-discovered
     local allIO = {}
     for _, name in ipairs(db.ioChests) do
         allIO[name] = true
@@ -415,11 +440,12 @@ end
 return db
 ]=]
 
-embeddedFiles["net_protocol.lua"] = [=[-- Network Communication Protocol for AetherVault OS
+embeddedFiles["net_protocol.lua"] = [=[-- Network Communication Protocol for CC:Tweaked Wireless Pocket Computers & Storage Server
 local config = require("config")
 
 local net = {}
 
+-- Open wireless modem on computer if available
 function net.openWirelessModem()
     local modem = peripheral.find("modem", function(name, wrapped)
         return wrapped.isWireless()
@@ -429,6 +455,7 @@ function net.openWirelessModem()
         rednet.open(modemSide)
         return true, modemSide
     end
+    -- Fallback: check all modems
     for _, side in ipairs(rs.getSides()) do
         if peripheral.isPresent(side) and peripheral.getType(side) == "modem" then
             rednet.open(side)
@@ -438,6 +465,7 @@ function net.openWirelessModem()
     return false, "No wireless modem found!"
 end
 
+-- Find server on wireless network
 function net.findServer(timeout)
     timeout = timeout or 2
     local serverId = rednet.lookup(config.data.protocol, config.data.hostname)
@@ -447,6 +475,7 @@ function net.findServer(timeout)
     return nil, "Storage Server not found on Rednet channel " .. config.data.protocol
 end
 
+-- Send RPC request to server and wait for reply
 function net.sendRequest(serverId, command, payload, timeout)
     timeout = timeout or 3
     local req = {
@@ -466,11 +495,205 @@ end
 return net
 ]=]
 
+embeddedFiles["io_config_tool.lua"] = [=[-- Interactive IO Chest Configuration & GPS Calibration Tool
+local config = require("config")
+
+term.clear()
+term.setCursorPos(1, 1)
+
+local function drawHeader()
+    term.clear()
+    term.setCursorPos(1, 1)
+    term.setTextColor(colors.yellow)
+    print("========================================")
+    print("   AetherVault IO & GPS Setup Tool      ")
+    print("========================================")
+    term.setTextColor(colors.white)
+    print()
+end
+
+local function getGPSCoords()
+    term.setTextColor(colors.cyan)
+    write("Locating GPS coordinates...")
+    local x, y, z = gps.locate(3)
+    print()
+    if x and y and z then
+        term.setTextColor(colors.green)
+        print(string.format("GPS position found: X=%.1f, Y=%.1f, Z=%.1f", x, y, z))
+        return x, y, z
+    else
+        term.setTextColor(colors.orange)
+        print("GPS signal not found (no GPS host in range).")
+        return nil
+    end
+end
+
+local function listConnectedInventories()
+    local names = peripheral.getNames()
+    local inventories = {}
+    for _, name in ipairs(names) do
+        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") then
+            table.insert(inventories, name)
+        end
+    end
+    return inventories
+end
+
+local function main()
+    while true do
+        drawHeader()
+        print("1) List Connected & Configured IO Chests")
+        print("2) Register / Edit IO Chest (with GPS)")
+        print("3) Remove Registered IO Chest")
+        print("4) Perform Test Deposit from IO Chest")
+        print("5) Exit")
+        print()
+        write("Select option (1-5): ")
+        local choice = read()
+
+        if choice == "1" then
+            drawHeader()
+            print("Registered IO Chests in config:")
+            local ioChests = config.getIOChests()
+            local count = 0
+            for pName, data in pairs(ioChests) do
+                count = count + 1
+                local present = peripheral.isPresent(pName) and "[CONNECTED]" or "[MISSING]"
+                term.setTextColor(present:find("CONNECTED") and colors.green or colors.red)
+                print(string.format("- %s (%s) %s", pName, data.label, present))
+                term.setTextColor(colors.lightGray)
+                print(string.format("  Coords: X=%d, Y=%d, Z=%d | Role: %s", data.x, data.y, data.z, data.role))
+                term.setTextColor(colors.white)
+            end
+            if count == 0 then
+                print("No IO chests registered yet.")
+            end
+            print()
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "2" then
+            drawHeader()
+            print("Available Connected Inventories:")
+            local inventories = listConnectedInventories()
+            if #inventories == 0 then
+                term.setTextColor(colors.red)
+                print("No inventory peripherals found connected to wired modems!")
+                write("Press Enter to return...")
+                read()
+            else
+                for i, name in ipairs(inventories) do
+                    local isRegistered = config.isIOChest(name) and " [REG]" or ""
+                    print(string.format("%d) %s%s", i, name, isRegistered))
+                end
+                print()
+                write("Select inventory number to register: ")
+                local num = tonumber(read())
+                if num and inventories[num] then
+                    local pName = inventories[num]
+                    drawHeader()
+                    print("Configuring IO Chest: " .. pName)
+                    print()
+                    write("Enter friendly label (e.g., Main IO, Base Mine): ")
+                    local label = read()
+                    if label == "" then label = pName end
+
+                    print()
+                    print("Chest Role:")
+                    print("1) Both (Input & Output)")
+                    print("2) Input only")
+                    print("3) Output only")
+                    write("Choice (1-3) [default 1]: ")
+                    local roleChoice = read()
+                    local role = "both"
+                    if roleChoice == "2" then role = "input"
+                    elseif roleChoice == "3" then role = "output" end
+
+                    print()
+                    local gpsX, gpsY, gpsZ = getGPSCoords()
+                    local finalX, finalY, finalZ
+
+                    if gpsX then
+                        write("Use detected GPS coords? (Y/n): ")
+                        local useGps = read():lower()
+                        if useGps == "" or useGps == "y" then
+                            finalX, finalY, finalZ = math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)
+                        end
+                    end
+
+                    if not finalX then
+                        write("Enter X coordinate: ")
+                        finalX = tonumber(read()) or 0
+                        write("Enter Y coordinate: ")
+                        finalY = tonumber(read()) or 0
+                        write("Enter Z coordinate: ")
+                        finalZ = tonumber(read()) or 0
+                    end
+
+                    config.setIOChest(pName, label, finalX, finalY, finalZ, role)
+                    term.setTextColor(colors.green)
+                    print()
+                    print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
+                    write("Press Enter to continue...")
+                    read()
+                end
+            end
+
+        elseif choice == "3" then
+            drawHeader()
+            local ioChests = config.getIOChests()
+            local list = {}
+            for pName, data in pairs(ioChests) do
+                table.insert(list, pName)
+                print(string.format("%d) %s (%s)", #list, pName, data.label))
+            end
+            if #list == 0 then
+                print("No registered IO chests to remove.")
+            else
+                print()
+                write("Select chest number to remove: ")
+                local num = tonumber(read())
+                if num and list[num] then
+                    config.removeIOChest(list[num])
+                    term.setTextColor(colors.green)
+                    print("Removed " .. list[num])
+                end
+            end
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "4" then
+            local db = require("db")
+            drawHeader()
+            print("Scanning & performing test deposit...")
+            local count, err = db.depositAllIO()
+            if err then
+                term.setTextColor(colors.red)
+                print("Error: " .. tostring(err))
+            else
+                term.setTextColor(colors.green)
+                print(string.format("Successfully deposited %d items into storage system!", count))
+            end
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "5" then
+            term.clear()
+            term.setCursorPos(1, 1)
+            break
+        end
+    end
+end
+
+main()
+]=]
+
 embeddedFiles["storage_server.lua"] = [=[-- Main Server Storage System with Basalt v2.5 GUI & Wireless Rednet Controller
 local config = require("config")
 local db = require("db")
 local net = require("net_protocol")
 
+-- Check for Basalt framework
 local basaltOK, basalt = pcall(require, "basalt")
 if not basaltOK then
     term.setTextColor(colors.red)
@@ -479,6 +702,7 @@ if not basaltOK then
     return
 end
 
+-- Initialize network
 local modemOK, modemSide = net.openWirelessModem()
 if modemOK then
     rednet.host(config.data.protocol, config.data.hostname)
@@ -487,17 +711,21 @@ else
     db.addLog("Warning: No wireless modem active. Remote pocket computer control disabled.", "warning")
 end
 
+-- Get terminal dimensions dynamically
 local termW, termH = term.getSize()
 termW = termW or 51
 termH = termH or 19
 local contentH = termH - 4
 
+-- Initial scan
 db.scanStorage()
 db.addLog("Storage system initialized.", "system")
 
+-- Create main GUI Frame with Basalt 2.5
 local mainFrame = (basalt.getMainFrame and basalt.getMainFrame()) or basalt.createFrame()
 mainFrame:setSize(termW, termH):setBackground(colors.lightGray)
 
+-- Header / Status Bar
 local titleBar = mainFrame:addFrame()
     :setPosition(1, 1)
     :setSize(termW, 3)
@@ -524,6 +752,7 @@ local function updateStatsDisplay()
     statsLabel.text = string.format("Items: %d | Types: %d | IO Chests: %d", totalItems, typeCount, ioCount)
 end
 
+-- Tab Buttons Navigation
 local tabItemsBtn = mainFrame:addButton()
     :setPosition(1, 4)
     :setSize(12, 1)
@@ -552,11 +781,15 @@ local tabSettingsBtn = mainFrame:addButton()
     :setBackground(colors.cyan)
     :setForeground(colors.black)
 
+-- Main Container Content Frame
 local contentFrame = mainFrame:addFrame()
     :setPosition(1, 5)
     :setSize(termW, contentH)
     :setBackground(colors.lightGray)
 
+---------------------------------------------------------
+-- TAB 1: ITEM CATALOG
+---------------------------------------------------------
 local itemsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize(termW, contentH)
@@ -652,6 +885,9 @@ withdrawBtn:onClick(function()
     end
 end)
 
+---------------------------------------------------------
+-- TAB 2: IO CHESTS MANAGER
+---------------------------------------------------------
 local ioFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize(termW, contentH)
@@ -684,6 +920,9 @@ ioDepositBtn:onClick(function()
     populateItemList(searchInput.text or searchInput.value or "")
 end)
 
+---------------------------------------------------------
+-- TAB 3: ACTIVITY LOGS
+---------------------------------------------------------
 local logsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize(termW, contentH)
@@ -703,6 +942,9 @@ local function populateLogs()
     end
 end
 
+---------------------------------------------------------
+-- TAB 4: SETTINGS
+---------------------------------------------------------
 local settingsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
     :setSize(termW, contentH)
@@ -725,6 +967,9 @@ autoDepositBtn:onClick(function()
         :setBackground(config.data.autoDeposit and colors.green or colors.red)
 end)
 
+---------------------------------------------------------
+-- TAB SWITCHING NAVIGATION HANDLER
+---------------------------------------------------------
 local function setFrameVisibility(frm, visible)
     if visible then
         if frm.show then frm:show() else frm.visible = true end
@@ -769,6 +1014,9 @@ tabSettingsBtn:onClick(function() setActiveTab("settings") end)
 
 setActiveTab("items")
 
+---------------------------------------------------------
+-- BACKGROUND REDNET LISTENER (NON-BLOCKING SCHEDULE)
+---------------------------------------------------------
 basalt.schedule(function()
     while true do
         local senderId, message, protocol = rednet.receive(config.data.protocol, 0)
@@ -1118,200 +1366,8 @@ else
 end
 ]=]
 
-embeddedFiles["io_config_tool.lua"] = [=[-- Interactive IO Chest Configuration & GPS Calibration Tool
-local config = require("config")
 
-term.clear()
-term.setCursorPos(1, 1)
-
-local function drawHeader()
-    term.clear()
-    term.setCursorPos(1, 1)
-    term.setTextColor(colors.yellow)
-    print("========================================")
-    print("   AetherVault IO & GPS Setup Tool      ")
-    print("========================================")
-    term.setTextColor(colors.white)
-    print()
-end
-
-local function getGPSCoords()
-    term.setTextColor(colors.cyan)
-    write("Locating GPS coordinates...")
-    local x, y, z = gps.locate(3)
-    print()
-    if x and y and z then
-        term.setTextColor(colors.green)
-        print(string.format("GPS position found: X=%.1f, Y=%.1f, Z=%.1f", x, y, z))
-        return x, y, z
-    else
-        term.setTextColor(colors.orange)
-        print("GPS signal not found (no GPS host in range).")
-        return nil
-    end
-end
-
-local function listConnectedInventories()
-    local names = peripheral.getNames()
-    local inventories = {}
-    for _, name in ipairs(names) do
-        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") then
-            table.insert(inventories, name)
-        end
-    end
-    return inventories
-end
-
-local function main()
-    while true do
-        drawHeader()
-        print("1) List Connected & Configured IO Chests")
-        print("2) Register / Edit IO Chest (with GPS)")
-        print("3) Remove Registered IO Chest")
-        print("4) Perform Test Deposit from IO Chest")
-        print("5) Exit")
-        print()
-        write("Select option (1-5): ")
-        local choice = read()
-
-        if choice == "1" then
-            drawHeader()
-            print("Registered IO Chests in config:")
-            local ioChests = config.getIOChests()
-            local count = 0
-            for pName, data in pairs(ioChests) do
-                count = count + 1
-                local present = peripheral.isPresent(pName) and "[CONNECTED]" or "[MISSING]"
-                term.setTextColor(present:find("CONNECTED") and colors.green or colors.red)
-                print(string.format("- %s (%s) %s", pName, data.label, present))
-                term.setTextColor(colors.lightGray)
-                print(string.format("  Coords: X=%d, Y=%d, Z=%d | Role: %s", data.x, data.y, data.z, data.role))
-                term.setTextColor(colors.white)
-            end
-            if count == 0 then
-                print("No IO chests registered yet.")
-            end
-            print()
-            write("Press Enter to continue...")
-            read()
-
-        elseif choice == "2" then
-            drawHeader()
-            print("Available Connected Inventories:")
-            local inventories = listConnectedInventories()
-            if #inventories == 0 then
-                term.setTextColor(colors.red)
-                print("No inventory peripherals found connected to wired modems!")
-                write("Press Enter to return...")
-                read()
-            else
-                for i, name in ipairs(inventories) do
-                    local isRegistered = config.isIOChest(name) and " [REG]" or ""
-                    print(string.format("%d) %s%s", i, name, isRegistered))
-                end
-                print()
-                write("Select inventory number to register: ")
-                local num = tonumber(read())
-                if num and inventories[num] then
-                    local pName = inventories[num]
-                    drawHeader()
-                    print("Configuring IO Chest: " .. pName)
-                    print()
-                    write("Enter friendly label (e.g., Main IO, Base Mine): ")
-                    local label = read()
-                    if label == "" then label = pName end
-
-                    print()
-                    print("Chest Role:")
-                    print("1) Both (Input & Output)")
-                    print("2) Input only")
-                    print("3) Output only")
-                    write("Choice (1-3) [default 1]: ")
-                    local roleChoice = read()
-                    local role = "both"
-                    if roleChoice == "2" then role = "input"
-                    elseif roleChoice == "3" then role = "output" end
-
-                    print()
-                    local gpsX, gpsY, gpsZ = getGPSCoords()
-                    local finalX, finalY, finalZ
-
-                    if gpsX then
-                        write("Use detected GPS coords? (Y/n): ")
-                        local useGps = read():lower()
-                        if useGps == "" or useGps == "y" then
-                            finalX, finalY, finalZ = math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)
-                        end
-                    end
-
-                    if not finalX then
-                        write("Enter X coordinate: ")
-                        finalX = tonumber(read()) or 0
-                        write("Enter Y coordinate: ")
-                        finalY = tonumber(read()) or 0
-                        write("Enter Z coordinate: ")
-                        finalZ = tonumber(read()) or 0
-                    end
-
-                    config.setIOChest(pName, label, finalX, finalY, finalZ, role)
-                    term.setTextColor(colors.green)
-                    print()
-                    print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
-                    write("Press Enter to continue...")
-                    read()
-                end
-            end
-
-        elseif choice == "3" then
-            drawHeader()
-            local ioChests = config.getIOChests()
-            local list = {}
-            for pName, data in pairs(ioChests) do
-                table.insert(list, pName)
-                print(string.format("%d) %s (%s)", #list, pName, data.label))
-            end
-            if #list == 0 then
-                print("No registered IO chests to remove.")
-            else
-                print()
-                write("Select chest number to remove: ")
-                local num = tonumber(read())
-                if num and list[num] then
-                    config.removeIOChest(list[num])
-                    term.setTextColor(colors.green)
-                    print("Removed " .. list[num])
-                end
-            end
-            write("Press Enter to continue...")
-            read()
-
-        elseif choice == "4" then
-            local db = require("db")
-            drawHeader()
-            print("Scanning & performing test deposit...")
-            local count, err = db.depositAllIO()
-            if err then
-                term.setTextColor(colors.red)
-                print("Error: " .. tostring(err))
-            else
-                term.setTextColor(colors.green)
-                print(string.format("Successfully deposited %d items into storage system!", count))
-            end
-            write("Press Enter to continue...")
-            read()
-
-        elseif choice == "5" then
-            term.clear()
-            term.setCursorPos(1, 1)
-            break
-        end
-    end
-end
-
-main()
-]=]
-
-filesToDownload = {
+local filesToDownload = {
     "config.lua",
     "db.lua",
     "net_protocol.lua",
@@ -1340,7 +1396,7 @@ if not fs.exists("basalt.lua") then
     term.setTextColor(colors.cyan)
     write("Downloading Basalt v2.5 framework...")
     local resp, err = http.get(BASALT_RAW_URL)
-    if resp me then
+    if resp then
         local code = resp.readAll()
         resp.close()
         writeFile("basalt.lua", code)
