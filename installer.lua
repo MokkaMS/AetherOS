@@ -190,6 +190,7 @@ db.storageChests = {}   -- List of peripheral names categorized as storage
 db.ioChests = {}        -- Cached IO chest peripherals
 db.logs = {}            -- Activity log entries for GUI display: { { timestamp, text, type } }
 db.isScanning = false
+db.isDefragging = false
 
 local MAX_LOGS = 100
 
@@ -280,11 +281,8 @@ local function formatDisplayName(technicalName, itemDetail)
     return formatted
 end
 
--- Complete scan of all storage chests and item indexing
-function db.scanStorage()
-    if db.isScanning then return false end
-    db.isScanning = true
-
+-- Complete scan of all storage chests and item indexing (internal implementation)
+local function doScanStorage()
     db.discoverPeripherals()
 
     local newItems = {}
@@ -292,8 +290,8 @@ function db.scanStorage()
     local lastYield = os.clock()
 
     for _, chestName in ipairs(db.storageChests) do
-        -- Only yield if execution time exceeds 0.4s to prevent lag without artificial delays
-        if (os.clock() - lastYield) > 0.4 and coroutine.running() then
+        -- Yield every 0.25s to prevent CC runtime timeout
+        if (os.clock() - lastYield) > 0.25 then
             os.sleep(0)
             lastYield = os.clock()
         end
@@ -303,7 +301,7 @@ function db.scanStorage()
             local ok, list = pcall(p.list)
             if ok and list then
                 for slot, item in pairs(list) do
-                    if item and item.name and item.count > 0 then
+                    if item and item.name and item.count and item.count > 0 then
                         local key = item.name
                         local entry = newItems[key]
                         if not entry then
@@ -339,22 +337,37 @@ function db.scanStorage()
     for _, itemData in pairs(db.items) do
         table.insert(indexArray, {
             name = itemData.name,
-            displayName = itemData.displayName,
-            total = itemData.total,
-            maxCount = itemData.maxCount
+            displayName = itemData.displayName or itemData.name,
+            total = itemData.total or 0,
+            maxCount = itemData.maxCount or 64
         })
     end
 
     table.sort(indexArray, function(a, b)
         if a.total == b.total then
-            return a.displayName:lower() < b.displayName:lower()
+            return (a.displayName or ""):lower() < (b.displayName or ""):lower()
         end
-        return a.total > b.total
+        return (a.total or 0) > (b.total or 0)
     end)
 
     db.itemIndex = indexArray
-    db.isScanning = false
     return true, #indexArray, totalItemCount
+end
+
+-- Public scanStorage with pcall concurrency protection
+function db.scanStorage()
+    if db.isScanning or db.isDefragging then return false end
+    db.isScanning = true
+
+    local success, res1, res2, res3 = pcall(doScanStorage)
+    db.isScanning = false
+
+    if not success then
+        db.addLog("Scan error: " .. tostring(res1), "error")
+        return false, res1
+    end
+
+    return res1, res2, res3
 end
 
 -- Calculate Euclidean distance between two 3D coordinates
@@ -683,100 +696,122 @@ end
 -- Storage defragmentation and compaction algorithm
 -- Consolidates partial stacks within chests and across chests to prevent slot waste
 function db.defragStorage()
-    if db.isScanning then
-        return 0, 0, "Scan currently in progress"
+    if db.isDefragging then
+        return 0, 0, "Defrag already in progress"
     end
+
+    -- Wait for any active scan to complete (up to 3 seconds)
+    local waitCount = 0
+    while db.isScanning and waitCount < 30 do
+        os.sleep(0.1)
+        waitCount = waitCount + 1
+    end
+    db.isScanning = false
+    db.isDefragging = true
 
     db.addLog("Starting storage compaction & defragmentation...", "info")
 
-    -- Ensure we have up-to-date peripheral & slot indexing
-    db.scanStorage()
+    local success, totalMerged, slotsFreed = pcall(function()
+        -- Ensure fresh indexing
+        doScanStorage()
 
-    local totalMerged = 0
-    local slotsFreed = 0
-    local lastYield = os.clock()
+        local merged = 0
+        local freed = 0
+        local lastYield = os.clock()
 
-    for itemName, itemData in pairs(db.items) do
-        if itemData.locations and #itemData.locations > 1 then
-            -- Find all partial stacks (less than 64 items)
-            local partials = {}
-            for _, loc in ipairs(itemData.locations) do
-                if loc.count and loc.count > 0 and loc.count < 64 then
-                    table.insert(partials, loc)
-                end
-            end
-
-            -- If 2 or more partial stacks exist for this item, consolidate them!
-            if #partials >= 2 then
-                -- Sort by count descending so larger partial stacks get topped up first
-                table.sort(partials, function(a, b)
-                    return a.count > b.count
-                end)
-
-                local destIdx = 1
-                local srcIdx = #partials
-                local itemUnstackable = false
-
-                while destIdx < srcIdx and not itemUnstackable do
-                    if (os.clock() - lastYield) > 0.4 and coroutine.running() then
-                        os.sleep(0)
-                        lastYield = os.clock()
+        for itemName, itemData in pairs(db.items) do
+            if itemData.locations and #itemData.locations > 1 then
+                -- Find all partial stacks (less than 64 items)
+                local partials = {}
+                for _, loc in ipairs(itemData.locations) do
+                    if loc.count and loc.count > 0 and loc.count < 64 then
+                        table.insert(partials, loc)
                     end
+                end
 
-                    local destLoc = partials[destIdx]
-                    local srcLoc = partials[srcIdx]
+                -- If 2 or more partial stacks exist for this item, consolidate them!
+                if #partials >= 2 then
+                    -- Sort by count descending so larger partial stacks get topped up first
+                    table.sort(partials, function(a, b)
+                        return a.count > b.count
+                    end)
 
-                    local space = 64 - destLoc.count
-                    if space > 0 and srcLoc.count > 0 then
-                        local toTransfer = math.min(srcLoc.count, space)
-                        local srcP = db.getPeripheral(srcLoc.chest)
+                    local destIdx = 1
+                    local srcIdx = #partials
+                    local itemUnstackable = false
 
-                        if srcP and srcP.pushItems then
-                            local ok, moved = pcall(srcP.pushItems, destLoc.chest, srcLoc.slot, toTransfer, destLoc.slot)
-                            if ok and moved and moved > 0 then
-                                totalMerged = totalMerged + moved
-                                destLoc.count = destLoc.count + moved
-                                srcLoc.count = srcLoc.count - moved
+                    while destIdx < srcIdx and not itemUnstackable do
+                        if (os.clock() - lastYield) > 0.25 then
+                            os.sleep(0)
+                            lastYield = os.clock()
+                        end
 
-                                if srcLoc.count <= 0 then
-                                    slotsFreed = slotsFreed + 1
-                                    srcIdx = srcIdx - 1
-                                end
+                        local destLoc = partials[destIdx]
+                        local srcLoc = partials[srcIdx]
 
-                                if destLoc.count >= 64 then
-                                    destIdx = destIdx + 1
+                        local space = 64 - destLoc.count
+                        if space > 0 and srcLoc.count > 0 then
+                            local toTransfer = math.min(srcLoc.count, space)
+                            local srcP = db.getPeripheral(srcLoc.chest)
+
+                            if srcP and srcP.pushItems then
+                                local ok, moved = pcall(srcP.pushItems, destLoc.chest, srcLoc.slot, toTransfer, destLoc.slot)
+                                if ok and moved and moved > 0 then
+                                    merged = merged + moved
+                                    destLoc.count = destLoc.count + moved
+                                    srcLoc.count = srcLoc.count - moved
+
+                                    if srcLoc.count <= 0 then
+                                        freed = freed + 1
+                                        srcIdx = srcIdx - 1
+                                    end
+
+                                    if destLoc.count >= 64 then
+                                        destIdx = destIdx + 1
+                                    end
+                                else
+                                    -- Could not move items
+                                    if destLoc.count == 1 and srcLoc.count == 1 then
+                                        -- Two stacks of 1 could not merge -> item is unstackable (tools/armor)
+                                        itemUnstackable = true
+                                    else
+                                        -- Destination stack cannot accept more (e.g. item max stack is 16)
+                                        destIdx = destIdx + 1
+                                    end
                                 end
                             else
-                                -- Could not move items
-                                if destLoc.count == 1 and srcLoc.count == 1 then
-                                    -- Two stacks of 1 could not merge -> item is unstackable (tools/armor)
-                                    itemUnstackable = true
-                                else
-                                    -- Destination stack cannot accept more (e.g. item max stack is 16)
-                                    destIdx = destIdx + 1
-                                end
+                                srcIdx = srcIdx - 1
                             end
                         else
-                            srcIdx = srcIdx - 1
-                        end
-                    else
-                        if destLoc.count >= 64 then
-                            destIdx = destIdx + 1
-                        end
-                        if srcLoc.count <= 0 then
-                            srcIdx = srcIdx - 1
+                            if destLoc.count >= 64 then
+                                destIdx = destIdx + 1
+                            end
+                            if srcLoc.count <= 0 then
+                                srcIdx = srcIdx - 1
+                            end
                         end
                     end
                 end
             end
         end
+
+        -- If items were relocated, rescan to synchronize state
+        if merged > 0 then
+            doScanStorage()
+        end
+
+        return merged, freed
+    end)
+
+    db.isDefragging = false
+
+    if not success then
+        db.addLog("Defrag error: " .. tostring(totalMerged), "error")
+        return 0, 0, tostring(totalMerged)
     end
 
-    -- If items were relocated, perform a scan to synchronize database state with physical chests
-    if totalMerged > 0 then
-        db.scanStorage()
-    end
-
+    totalMerged = totalMerged or 0
+    slotsFreed = slotsFreed or 0
     db.addLog(string.format("Storage defrag complete: %d items merged, %d slots freed", totalMerged, slotsFreed), "info")
     return totalMerged, slotsFreed, nil
 end
@@ -1741,14 +1776,24 @@ pullAllBtn:onClick(function()
 end)
 
 rescanBtn:onClick(function()
-    db.addLog("Refreshing storage index in background...", "info")
-    rescanBtn:setText("Scanning..."):setBackground(colors.yellow)
+    if rescanBtn.getText and rescanBtn:getText():find("Refreshing") then
+        return
+    end
+    rescanBtn:setText("Refreshing..."):setBackground(colors.yellow)
     basalt.schedule(function()
+        local waitCount = 0
+        while (db.isScanning or db.isDefragging) and waitCount < 30 do
+            os.sleep(0.1)
+            waitCount = waitCount + 1
+        end
+
+        db.addLog("Refreshing storage index in background...", "info")
         db.scanStorage()
         populateItemList(searchInput.text or searchInput.value or "")
+        updateStatsDisplay()
         rescanBtn:setText("Refresh"):setBackground(colors.green)
         db.addLog("Storage refresh complete.", "info")
-    end, 0)
+    end)
 end)
 
 withdrawBtn:onClick(function()
@@ -1864,9 +1909,24 @@ local logsList = logsFrame:addList()
 
 local function populateLogs()
     logsList:clear()
+    local maxLen = math.max(20, termW - 2)
     for _, log in ipairs(db.logs) do
-        local text = string.format("[%s] %s", log.timestamp, log.text)
-        logsList:addItem(text)
+        local fullText = string.format("[%s] %s", log.timestamp, log.text)
+        if #fullText <= maxLen then
+            logsList:addItem(fullText)
+        else
+            local remaining = fullText
+            local isFirst = true
+            while #remaining > 0 do
+                local chunk = remaining:sub(1, maxLen)
+                remaining = remaining:sub(maxLen + 1)
+                if not isFirst then
+                    chunk = "  " .. chunk
+                end
+                logsList:addItem(chunk)
+                isFirst = false
+            end
+        end
     end
 end
 
@@ -1930,12 +1990,12 @@ local defragStatusLabel = settingsFrame:addLabel()
 defragStatusLabel.text = ""
 
 defragBtn:onClick(function()
-    if db.isScanning then
-        db.addLog("Cannot defrag: storage scan currently in progress.", "warning")
+    if db.isDefragging then
+        db.addLog("Storage defrag already in progress.", "warning")
         return
     end
     defragBtn:setText("Defragmenting..."):setBackground(colors.yellow)
-    defragStatusLabel.text = "Consolidating partial stacks across chests..."
+    defragStatusLabel.text = "Waiting for scanner to finish..."
     basalt.schedule(function()
         local merged, freed, err = db.defragStorage()
         defragBtn:setText("Sort & Defrag Storage"):setBackground(colors.purple)
@@ -2132,8 +2192,8 @@ basalt.schedule(function()
                 end
 
             elseif cmd == "DEFRAG_STORAGE" then
-                if db.isScanning then
-                    response = { success = false, message = "Storage scan in progress, try again shortly" }
+                if db.isDefragging then
+                    response = { success = false, message = "Storage defrag already in progress" }
                 else
                     local merged, freed, err = db.defragStorage()
                     if err then
@@ -2161,17 +2221,19 @@ end)
 ---------------------------------------------------------
 basalt.schedule(function()
     while true do
-        sleep(config.data.scanInterval or 5)
-        local moved = 0
-        if config.data.autoDeposit then
-            moved = db.depositAllIO()
-        end
-        if moved == 0 then
-            db.scanStorage()
-        end
-        updateStatsDisplay()
-        if moved > 0 then
-            populateItemList(searchInput.text or searchInput.value or "")
+        sleep(config.data.scanInterval or 15)
+        if not db.isDefragging then
+            local moved = 0
+            if config.data.autoDeposit then
+                moved = db.depositAllIO()
+            end
+            if moved == 0 then
+                db.scanStorage()
+            end
+            updateStatsDisplay()
+            if moved > 0 then
+                populateItemList(searchInput.text or searchInput.value or "")
+            end
         end
     end
 end)

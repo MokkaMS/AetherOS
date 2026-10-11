@@ -462,14 +462,24 @@ pullAllBtn:onClick(function()
 end)
 
 rescanBtn:onClick(function()
-    db.addLog("Refreshing storage index in background...", "info")
-    rescanBtn:setText("Scanning..."):setBackground(colors.yellow)
+    if rescanBtn.getText and rescanBtn:getText():find("Refreshing") then
+        return
+    end
+    rescanBtn:setText("Refreshing..."):setBackground(colors.yellow)
     basalt.schedule(function()
+        local waitCount = 0
+        while (db.isScanning or db.isDefragging) and waitCount < 30 do
+            os.sleep(0.1)
+            waitCount = waitCount + 1
+        end
+
+        db.addLog("Refreshing storage index in background...", "info")
         db.scanStorage()
         populateItemList(searchInput.text or searchInput.value or "")
+        updateStatsDisplay()
         rescanBtn:setText("Refresh"):setBackground(colors.green)
         db.addLog("Storage refresh complete.", "info")
-    end, 0)
+    end)
 end)
 
 withdrawBtn:onClick(function()
@@ -585,9 +595,24 @@ local logsList = logsFrame:addList()
 
 local function populateLogs()
     logsList:clear()
+    local maxLen = math.max(20, termW - 2)
     for _, log in ipairs(db.logs) do
-        local text = string.format("[%s] %s", log.timestamp, log.text)
-        logsList:addItem(text)
+        local fullText = string.format("[%s] %s", log.timestamp, log.text)
+        if #fullText <= maxLen then
+            logsList:addItem(fullText)
+        else
+            local remaining = fullText
+            local isFirst = true
+            while #remaining > 0 do
+                local chunk = remaining:sub(1, maxLen)
+                remaining = remaining:sub(maxLen + 1)
+                if not isFirst then
+                    chunk = "  " .. chunk
+                end
+                logsList:addItem(chunk)
+                isFirst = false
+            end
+        end
     end
 end
 
@@ -651,12 +676,12 @@ local defragStatusLabel = settingsFrame:addLabel()
 defragStatusLabel.text = ""
 
 defragBtn:onClick(function()
-    if db.isScanning then
-        db.addLog("Cannot defrag: storage scan currently in progress.", "warning")
+    if db.isDefragging then
+        db.addLog("Storage defrag already in progress.", "warning")
         return
     end
     defragBtn:setText("Defragmenting..."):setBackground(colors.yellow)
-    defragStatusLabel.text = "Consolidating partial stacks across chests..."
+    defragStatusLabel.text = "Waiting for scanner to finish..."
     basalt.schedule(function()
         local merged, freed, err = db.defragStorage()
         defragBtn:setText("Sort & Defrag Storage"):setBackground(colors.purple)
@@ -853,8 +878,8 @@ basalt.schedule(function()
                 end
 
             elseif cmd == "DEFRAG_STORAGE" then
-                if db.isScanning then
-                    response = { success = false, message = "Storage scan in progress, try again shortly" }
+                if db.isDefragging then
+                    response = { success = false, message = "Storage defrag already in progress" }
                 else
                     local merged, freed, err = db.defragStorage()
                     if err then
@@ -882,17 +907,19 @@ end)
 ---------------------------------------------------------
 basalt.schedule(function()
     while true do
-        sleep(config.data.scanInterval or 5)
-        local moved = 0
-        if config.data.autoDeposit then
-            moved = db.depositAllIO()
-        end
-        if moved == 0 then
-            db.scanStorage()
-        end
-        updateStatsDisplay()
-        if moved > 0 then
-            populateItemList(searchInput.text or searchInput.value or "")
+        sleep(config.data.scanInterval or 15)
+        if not db.isDefragging then
+            local moved = 0
+            if config.data.autoDeposit then
+                moved = db.depositAllIO()
+            end
+            if moved == 0 then
+                db.scanStorage()
+            end
+            updateStatsDisplay()
+            if moved > 0 then
+                populateItemList(searchInput.text or searchInput.value or "")
+            end
         end
     end
 end)
