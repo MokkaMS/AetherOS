@@ -39,7 +39,8 @@ end
 -- Embedded System Files Backup
 local embeddedFiles = {}
 
-embeddedFiles["config.lua"] = [=[-- Configuration management for CC:Tweaked Storage & ME System
+embeddedFiles["config.lua"] = [=[
+-- Configuration management for CC:Tweaked Storage & ME System
 local config = {}
 
 local CONFIG_FILE = "/storage_config.json"
@@ -177,9 +178,11 @@ end
 config.load()
 
 return config
+
 ]=]
 
-embeddedFiles["db.lua"] = [=[-- Database and Storage Engine for CC:Tweaked ME System
+embeddedFiles["db.lua"] = [=[
+-- Database and Storage Engine for CC:Tweaked ME System
 local config = require("config")
 
 local db = {}
@@ -817,9 +820,11 @@ function db.defragStorage()
 end
 
 return db
+
 ]=]
 
-embeddedFiles["net_protocol.lua"] = [=[-- Network Communication Protocol for CC:Tweaked Wireless Pocket Computers & Storage Server
+embeddedFiles["net_protocol.lua"] = [=[
+-- Network Communication Protocol for CC:Tweaked Wireless Pocket Computers & Storage Server
 local config = require("config")
 
 local net = {}
@@ -911,9 +916,11 @@ function net.sendRequest(serverId, command, payload, timeout)
 end
 
 return net
+
 ]=]
 
-embeddedFiles["io_config_tool.lua"] = [=[-- Interactive IO Chest Configuration & GPS Calibration Tool
+embeddedFiles["io_config_tool.lua"] = [=[
+-- Interactive IO Chest Configuration & GPS Calibration Tool
 -- Supports both local server execution and remote execution over Rednet
 local config = require("config")
 local net = require("net_protocol")
@@ -1310,9 +1317,11 @@ local function main()
 end
 
 main()
+
 ]=]
 
-embeddedFiles["storage_server.lua"] = [=[-- Main Server Storage System with Basalt v2.5 GUI & Wireless Rednet Controller
+embeddedFiles["storage_server.lua"] = [=[
+-- Main Server Storage System with Basalt v2.5 GUI & Wireless Rednet Controller
 local config = require("config")
 local db = require("db")
 local net = require("net_protocol")
@@ -2265,9 +2274,11 @@ if basalt.run then
 else
     basalt.autoUpdate()
 end
+
 ]=]
 
-embeddedFiles["pocket_client.lua"] = [=[-- Pocket Computer Wireless Remote Client with Basalt v2.5 GUI
+embeddedFiles["pocket_client.lua"] = [=[
+-- Pocket Computer Wireless Remote Client with Basalt v2.5 GUI
 local config = require("config")
 local net = require("net_protocol")
 
@@ -2795,10 +2806,12 @@ if basalt.run then
 else
     basalt.autoUpdate()
 end
+
 ]=]
 
 
-embeddedFiles["io_terminal.lua"] = [=[-- AetherVault OS: Dedicated I/O Station & Quick-Order Monitor Terminal
+embeddedFiles["io_terminal.lua"] = [=[
+-- AetherVault OS: Dedicated I/O Station & Quick-Order Monitor Terminal
 -- Designed for Advanced Computers with Advanced Touchscreen Monitors & adjacent I/O chests
 local config = require("config")
 local net = require("net_protocol")
@@ -3154,8 +3167,7 @@ renderQuickOrderGrid = function()
     end
 
     local colW = math.floor((termW - (cols + 1)) / cols)
-    local btnH = 2 -- 2 lines per button: Line 1 = [+count Name], Line 2 = [Avail: X]
-    if termH <= 10 then btnH = 1 end
+    local btnH = 1
 
     for idx, order in ipairs(quickOrders) do
         local colIdx = (idx - 1) % cols
@@ -3171,13 +3183,7 @@ renderQuickOrderGrid = function()
             dispName = dispName:sub(1, maxNameLen - 1) .. "."
         end
 
-        local btnText = ""
-        if btnH == 1 then
-            btnText = string.format("+%d %s (%d)", order.count, dispName, avail)
-        else
-            btnText = string.format("+%d %s
-Stock: %d", order.count, dispName, avail)
-        end
+        local btnText = string.format("+%d %s [%d]", order.count, dispName, avail)
 
         local btnBg = (avail >= order.count) and colors.blue or (avail > 0 and colors.orange or colors.gray)
         if delMode then btnBg = colors.red end
@@ -3416,6 +3422,7 @@ if basalt.run then
 else
     basalt.autoUpdate()
 end
+
 ]=]
 
 local filesToDownload = {

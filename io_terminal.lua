@@ -354,8 +354,7 @@ renderQuickOrderGrid = function()
     end
 
     local colW = math.floor((termW - (cols + 1)) / cols)
-    local btnH = 2 -- 2 lines per button: Line 1 = [+count Name], Line 2 = [Avail: X]
-    if termH <= 10 then btnH = 1 end
+    local btnH = 1
 
     for idx, order in ipairs(quickOrders) do
         local colIdx = (idx - 1) % cols
@@ -371,12 +370,7 @@ renderQuickOrderGrid = function()
             dispName = dispName:sub(1, maxNameLen - 1) .. "."
         end
 
-        local btnText = ""
-        if btnH == 1 then
-            btnText = string.format("+%d %s (%d)", order.count, dispName, avail)
-        else
-            btnText = string.format("+%d %s\nStock: %d", order.count, dispName, avail)
-        end
+        local btnText = string.format("+%d %s [%d]", order.count, dispName, avail)
 
         local btnBg = (avail >= order.count) and colors.blue or (avail > 0 and colors.orange or colors.gray)
         if delMode then btnBg = colors.red end
