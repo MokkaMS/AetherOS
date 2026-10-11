@@ -516,6 +516,15 @@ function db.withdrawMulti(requests, targetIOChest)
     return totalMoved, nil
 end
 
+local function updateItemIndexTotal(name, newTotal)
+    for _, entry in ipairs(db.itemIndex) do
+        if entry.name == name then
+            entry.total = newTotal
+            return
+        end
+    end
+end
+
 -- Deposit items from an IO chest into storage chests
 function db.deposit(sourceIOChest, skipRescan)
     if not sourceIOChest then
@@ -549,9 +558,31 @@ function db.deposit(sourceIOChest, skipRescan)
             local remaining = item.count
             local triedChests = {}
 
-            -- Phase 1: Try chests that already contain this item (grouping items together)
             local existingData = db.items[item.name]
+
+            -- Phase 1: Fill existing partial stacks of this item first across storage
+            -- Pushing directly to specific slots (toSlot) guarantees partial stacks are topped up to 64
+            -- before any empty slots are touched, preventing duplicate partial stacks!
             if existingData and existingData.locations then
+                for _, loc in ipairs(existingData.locations) do
+                    if remaining <= 0 then break end
+                    if loc.count and loc.count > 0 and loc.count < 64 and not fullChests[loc.chest] then
+                        local space = 64 - loc.count
+                        local toPush = math.min(remaining, space)
+                        local pok, moved = pcall(sourceP.pushItems, loc.chest, slot, toPush, loc.slot)
+                        if pok and moved and moved > 0 then
+                            remaining = remaining - moved
+                            totalDeposited = totalDeposited + moved
+                            loc.count = loc.count + moved
+                            existingData.total = existingData.total + moved
+                            updateItemIndexTotal(item.name, existingData.total)
+                        end
+                    end
+                end
+            end
+
+            -- Phase 2: Place remaining into chests that already contain this item (grouping items together)
+            if remaining > 0 and existingData and existingData.locations then
                 for _, loc in ipairs(existingData.locations) do
                     if remaining <= 0 then break end
                     local targetChest = loc.chest
@@ -562,6 +593,7 @@ function db.deposit(sourceIOChest, skipRescan)
                             remaining = remaining - moved
                             totalDeposited = totalDeposited + moved
                             existingData.total = existingData.total + moved
+                            updateItemIndexTotal(item.name, existingData.total)
                         end
                         if not pok or not moved or moved < remaining then
                             fullChests[targetChest] = true
@@ -570,7 +602,7 @@ function db.deposit(sourceIOChest, skipRescan)
                 end
             end
 
-            -- Phase 2: Put remaining items into any available storage chest
+            -- Phase 3: Put remaining items into any available storage chest
             if remaining > 0 then
                 for _, chestName in ipairs(db.storageChests) do
                     if remaining <= 0 then break end
@@ -582,6 +614,7 @@ function db.deposit(sourceIOChest, skipRescan)
                             totalDeposited = totalDeposited + moved
                             if db.items[item.name] then
                                 db.items[item.name].total = db.items[item.name].total + moved
+                                updateItemIndexTotal(item.name, db.items[item.name].total)
                             else
                                 local disp = formatDisplayName(item.name)
                                 db.items[item.name] = {
@@ -645,6 +678,107 @@ function db.depositAllIO()
         db.scanStorage()
     end
     return grandTotal
+end
+
+-- Storage defragmentation and compaction algorithm
+-- Consolidates partial stacks within chests and across chests to prevent slot waste
+function db.defragStorage()
+    if db.isScanning then
+        return 0, 0, "Scan currently in progress"
+    end
+
+    db.addLog("Starting storage compaction & defragmentation...", "info")
+
+    -- Ensure we have up-to-date peripheral & slot indexing
+    db.scanStorage()
+
+    local totalMerged = 0
+    local slotsFreed = 0
+    local lastYield = os.clock()
+
+    for itemName, itemData in pairs(db.items) do
+        if itemData.locations and #itemData.locations > 1 then
+            -- Find all partial stacks (less than 64 items)
+            local partials = {}
+            for _, loc in ipairs(itemData.locations) do
+                if loc.count and loc.count > 0 and loc.count < 64 then
+                    table.insert(partials, loc)
+                end
+            end
+
+            -- If 2 or more partial stacks exist for this item, consolidate them!
+            if #partials >= 2 then
+                -- Sort by count descending so larger partial stacks get topped up first
+                table.sort(partials, function(a, b)
+                    return a.count > b.count
+                end)
+
+                local destIdx = 1
+                local srcIdx = #partials
+                local itemUnstackable = false
+
+                while destIdx < srcIdx and not itemUnstackable do
+                    if (os.clock() - lastYield) > 0.4 and coroutine.running() then
+                        os.sleep(0)
+                        lastYield = os.clock()
+                    end
+
+                    local destLoc = partials[destIdx]
+                    local srcLoc = partials[srcIdx]
+
+                    local space = 64 - destLoc.count
+                    if space > 0 and srcLoc.count > 0 then
+                        local toTransfer = math.min(srcLoc.count, space)
+                        local srcP = db.getPeripheral(srcLoc.chest)
+
+                        if srcP and srcP.pushItems then
+                            local ok, moved = pcall(srcP.pushItems, destLoc.chest, srcLoc.slot, toTransfer, destLoc.slot)
+                            if ok and moved and moved > 0 then
+                                totalMerged = totalMerged + moved
+                                destLoc.count = destLoc.count + moved
+                                srcLoc.count = srcLoc.count - moved
+
+                                if srcLoc.count <= 0 then
+                                    slotsFreed = slotsFreed + 1
+                                    srcIdx = srcIdx - 1
+                                end
+
+                                if destLoc.count >= 64 then
+                                    destIdx = destIdx + 1
+                                end
+                            else
+                                -- Could not move items
+                                if destLoc.count == 1 and srcLoc.count == 1 then
+                                    -- Two stacks of 1 could not merge -> item is unstackable (tools/armor)
+                                    itemUnstackable = true
+                                else
+                                    -- Destination stack cannot accept more (e.g. item max stack is 16)
+                                    destIdx = destIdx + 1
+                                end
+                            end
+                        else
+                            srcIdx = srcIdx - 1
+                        end
+                    else
+                        if destLoc.count >= 64 then
+                            destIdx = destIdx + 1
+                        end
+                        if srcLoc.count <= 0 then
+                            srcIdx = srcIdx - 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- If items were relocated, perform a scan to synchronize database state with physical chests
+    if totalMerged > 0 then
+        db.scanStorage()
+    end
+
+    db.addLog(string.format("Storage defrag complete: %d items merged, %d slots freed", totalMerged, slotsFreed), "info")
+    return totalMerged, slotsFreed, nil
 end
 
 return db
@@ -1783,6 +1917,39 @@ autoDepositBtn:onClick(function()
         :setBackground(config.data.autoDeposit and colors.green or colors.red)
 end)
 
+local defragBtn = settingsFrame:addButton()
+    :setPosition(2, 8)
+    :setSize(28, 1)
+    :setText("Sort & Defrag Storage")
+    :setBackground(colors.purple)
+    :setForeground(colors.white)
+
+local defragStatusLabel = settingsFrame:addLabel()
+    :setPosition(2, 10)
+    :setForeground(colors.yellow)
+defragStatusLabel.text = ""
+
+defragBtn:onClick(function()
+    if db.isScanning then
+        db.addLog("Cannot defrag: storage scan currently in progress.", "warning")
+        return
+    end
+    defragBtn:setText("Defragmenting..."):setBackground(colors.yellow)
+    defragStatusLabel.text = "Consolidating partial stacks across chests..."
+    basalt.schedule(function()
+        local merged, freed, err = db.defragStorage()
+        defragBtn:setText("Sort & Defrag Storage"):setBackground(colors.purple)
+        if err then
+            defragStatusLabel.text = "Error: " .. tostring(err)
+            db.addLog("Defrag failed: " .. tostring(err), "error")
+        else
+            defragStatusLabel.text = string.format("Complete: merged %d items, freed %d slots", merged, freed)
+            updateStatsDisplay()
+            populateItemList(searchInput.text or searchInput.value or "")
+        end
+    end)
+end)
+
 ---------------------------------------------------------
 -- TAB SWITCHING NAVIGATION HANDLER
 ---------------------------------------------------------
@@ -1962,6 +2129,24 @@ basalt.schedule(function()
                     updateStatsDisplay()
                 else
                     response = { success = false, message = "Missing peripheralName parameter" }
+                end
+
+            elseif cmd == "DEFRAG_STORAGE" then
+                if db.isScanning then
+                    response = { success = false, message = "Storage scan in progress, try again shortly" }
+                else
+                    local merged, freed, err = db.defragStorage()
+                    if err then
+                        response = { success = false, message = err }
+                    else
+                        response = {
+                            success = true,
+                            merged = merged,
+                            freed = freed,
+                            message = string.format("Storage defrag complete: merged %d items, freed %d slots", merged, freed)
+                        }
+                        updateStatsDisplay()
+                    end
                 end
             end
 

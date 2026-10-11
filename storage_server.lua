@@ -638,6 +638,39 @@ autoDepositBtn:onClick(function()
         :setBackground(config.data.autoDeposit and colors.green or colors.red)
 end)
 
+local defragBtn = settingsFrame:addButton()
+    :setPosition(2, 8)
+    :setSize(28, 1)
+    :setText("Sort & Defrag Storage")
+    :setBackground(colors.purple)
+    :setForeground(colors.white)
+
+local defragStatusLabel = settingsFrame:addLabel()
+    :setPosition(2, 10)
+    :setForeground(colors.yellow)
+defragStatusLabel.text = ""
+
+defragBtn:onClick(function()
+    if db.isScanning then
+        db.addLog("Cannot defrag: storage scan currently in progress.", "warning")
+        return
+    end
+    defragBtn:setText("Defragmenting..."):setBackground(colors.yellow)
+    defragStatusLabel.text = "Consolidating partial stacks across chests..."
+    basalt.schedule(function()
+        local merged, freed, err = db.defragStorage()
+        defragBtn:setText("Sort & Defrag Storage"):setBackground(colors.purple)
+        if err then
+            defragStatusLabel.text = "Error: " .. tostring(err)
+            db.addLog("Defrag failed: " .. tostring(err), "error")
+        else
+            defragStatusLabel.text = string.format("Complete: merged %d items, freed %d slots", merged, freed)
+            updateStatsDisplay()
+            populateItemList(searchInput.text or searchInput.value or "")
+        end
+    end)
+end)
+
 ---------------------------------------------------------
 -- TAB SWITCHING NAVIGATION HANDLER
 ---------------------------------------------------------
@@ -817,6 +850,24 @@ basalt.schedule(function()
                     updateStatsDisplay()
                 else
                     response = { success = false, message = "Missing peripheralName parameter" }
+                end
+
+            elseif cmd == "DEFRAG_STORAGE" then
+                if db.isScanning then
+                    response = { success = false, message = "Storage scan in progress, try again shortly" }
+                else
+                    local merged, freed, err = db.defragStorage()
+                    if err then
+                        response = { success = false, message = err }
+                    else
+                        response = {
+                            success = true,
+                            merged = merged,
+                            freed = freed,
+                            message = string.format("Storage defrag complete: merged %d items, freed %d slots", merged, freed)
+                        }
+                        updateStatsDisplay()
+                    end
                 end
             end
 
