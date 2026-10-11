@@ -64,7 +64,32 @@ end
 
 function config.isIOChest(peripheralName)
     config.load()
-    return config.data.ioChests[peripheralName] ~= nil
+    if not peripheralName then return false end
+    if config.data.ioChests[peripheralName] then return true end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for k, _ in pairs(config.data.ioChests) do
+        local kStripped = k:match("[^:]+:(.+)") or k
+        if kStripped == stripped or k == peripheralName then
+            return true
+        end
+    end
+    return false
+end
+
+function config.getIOChestInfo(peripheralName)
+    config.load()
+    if not peripheralName then return nil end
+    if config.data.ioChests[peripheralName] then
+        return config.data.ioChests[peripheralName]
+    end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for k, v in pairs(config.data.ioChests) do
+        local kStripped = k:match("[^:]+:(.+)") or k
+        if kStripped == stripped or k == peripheralName then
+            return v
+        end
+    end
+    return nil
 end
 
 -- Initialize default config on load

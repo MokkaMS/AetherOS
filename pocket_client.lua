@@ -218,21 +218,62 @@ local function fetchItems()
     end
 end
 
-itemList:onSelect(function(self, item, index)
-    local itemName = nil
-    if type(index) == "number" and filteredItems[index] then
-        itemName = filteredItems[index]
-    elseif type(item) == "table" then
-        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
-    elseif type(item) == "string" then
-        itemName = item
+local isUpdatingList = false
+
+local function resolveSelectedItemName(self, item, index)
+    local idx = nil
+    if type(index) == "number" then
+        idx = index
+    elseif type(item) == "number" then
+        idx = item
+    elseif self and self.getSelectedIndex then
+        local ok, val = pcall(self.getSelectedIndex, self)
+        if ok and type(val) == "number" then idx = val end
     end
 
+    if idx and filteredItems[idx] then
+        return filteredItems[idx]
+    end
+
+    local itemObj = item or (self and self.getItem and idx and pcall(self.getItem, self, idx) and self:getItem(idx)) or (self and self.getValue and pcall(self.getValue, self) and self:getValue())
+    local strText = nil
+    if type(itemObj) == "table" then
+        if itemObj.value then return itemObj.value end
+        if itemObj.name then return itemObj.name end
+        if itemObj.args and itemObj.args[1] then return itemObj.args[1] end
+        strText = itemObj.text
+    elseif type(itemObj) == "string" then
+        strText = itemObj
+    end
+
+    if strText then
+        local cleanName = strText:match("^%[%p%]%s+(.-)%s+%d+$") or strText:match("^%[%p%]%s+(.+)$") or strText
+        cleanName = cleanName:gsub("^%s*(.-)%s*$", "%1")
+        for _, it in ipairs(currentItems) do
+            if it.displayName == cleanName or it.name == cleanName or cleanName:find(it.displayName, 1, true) then
+                return it.name
+            end
+        end
+    end
+
+    return nil
+end
+
+local function handleSelection(self, item, index)
+    if isUpdatingList then return end
+    local itemName = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
-        populateList()
+        isUpdatingList = true
+        basalt.schedule(function()
+            populateList()
+            isUpdatingList = false
+        end, 0)
     end
-end)
+end
+
+if itemList.onSelect then itemList:onSelect(handleSelection) end
+if itemList.onChange then itemList:onChange(handleSelection) end
 
 searchInput:onChange(function(self, text)
     populateList()

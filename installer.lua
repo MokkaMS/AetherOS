@@ -105,7 +105,32 @@ end
 
 function config.isIOChest(peripheralName)
     config.load()
-    return config.data.ioChests[peripheralName] ~= nil
+    if not peripheralName then return false end
+    if config.data.ioChests[peripheralName] then return true end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for k, _ in pairs(config.data.ioChests) do
+        local kStripped = k:match("[^:]+:(.+)") or k
+        if kStripped == stripped or k == peripheralName then
+            return true
+        end
+    end
+    return false
+end
+
+function config.getIOChestInfo(peripheralName)
+    config.load()
+    if not peripheralName then return nil end
+    if config.data.ioChests[peripheralName] then
+        return config.data.ioChests[peripheralName]
+    end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for k, v in pairs(config.data.ioChests) do
+        local kStripped = k:match("[^:]+:(.+)") or k
+        if kStripped == stripped or k == peripheralName then
+            return v
+        end
+    end
+    return nil
 end
 
 -- Initialize default config on load
@@ -1074,21 +1099,62 @@ local function populateItemList(filter)
     updateAutoComplete(filter)
 end
 
-itemList:onSelect(function(self, item, index)
-    local itemName = nil
-    if type(index) == "number" and filteredItems[index] then
-        itemName = filteredItems[index]
-    elseif type(item) == "table" then
-        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
-    elseif type(item) == "string" then
-        itemName = item
+local isUpdatingList = false
+
+local function resolveSelectedItemName(self, item, index)
+    local idx = nil
+    if type(index) == "number" then
+        idx = index
+    elseif type(item) == "number" then
+        idx = item
+    elseif self and self.getSelectedIndex then
+        local ok, val = pcall(self.getSelectedIndex, self)
+        if ok and type(val) == "number" then idx = val end
     end
 
+    if idx and filteredItems[idx] then
+        return filteredItems[idx]
+    end
+
+    local itemObj = item or (self and self.getItem and idx and pcall(self.getItem, self, idx) and self:getItem(idx)) or (self and self.getValue and pcall(self.getValue, self) and self:getValue())
+    local strText = nil
+    if type(itemObj) == "table" then
+        if itemObj.value then return itemObj.value end
+        if itemObj.name then return itemObj.name end
+        if itemObj.args and itemObj.args[1] then return itemObj.args[1] end
+        strText = itemObj.text
+    elseif type(itemObj) == "string" then
+        strText = itemObj
+    end
+
+    if strText then
+        local cleanName = strText:match("^%[%p%]%s+(.-)%s+%d+$") or strText:match("^%[%p%]%s+(.+)$") or strText
+        cleanName = cleanName:gsub("^%s*(.-)%s*$", "%1")
+        for _, it in ipairs(db.itemIndex) do
+            if it.displayName == cleanName or it.name == cleanName or cleanName:find(it.displayName, 1, true) then
+                return it.name
+            end
+        end
+    end
+
+    return nil
+end
+
+local function handleSelection(self, item, index)
+    if isUpdatingList then return end
+    local itemName = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
-        populateItemList(searchInput.text or searchInput.value or "")
+        isUpdatingList = true
+        basalt.schedule(function()
+            populateItemList(searchInput.text or searchInput.value or "")
+            isUpdatingList = false
+        end, 0)
     end
-end)
+end
+
+if itemList.onSelect then itemList:onSelect(handleSelection) end
+if itemList.onChange then itemList:onChange(handleSelection) end
 
 searchInput:onChange(function(self, text)
     populateItemList(text or searchInput.text or searchInput.value or "")
@@ -1190,16 +1256,39 @@ local ioDepositBtn = ioFrame:addButton()
 local function populateIOList()
     ioList:clear()
     local registered = config.getIOChests()
+    local allPeripherals = peripheral.getNames()
+    local seen = {}
+
+    -- First list all registered IO chests
     for pName, data in pairs(registered) do
-        local present = peripheral.isPresent(pName) and "[ONLINE]" or "[OFFLINE]"
-        local text = string.format("%s %-16s [%d, %d, %d] Role: %s", present, data.label, data.x, data.y, data.z, data.role)
+        seen[pName] = true
+        local isPresent = peripheral.isPresent(pName)
+        local status = isPresent and "[ONLINE]" or "[OFFLINE]"
+        local label = data.label or pName
+        if #label > 14 then label = label:sub(1, 12) .. ".." end
+        local text = string.format("%-9s IO: %-14s [%d,%d,%d] Role:%s", status, label, data.x or 0, data.y or 0, data.z or 0, data.role or "both")
         ioList:addItem(text)
+    end
+
+    -- Also list all connected inventory peripherals on network
+    for _, name in ipairs(allPeripherals) do
+        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") and not name:find("drive") then
+            if not seen[name] and not config.isIOChest(name) then
+                seen[name] = true
+                local label = name
+                if #label > 16 then label = label:sub(1, 14) .. ".." end
+                local text = string.format("[ONLINE]  STORAGE: %-16s (Connected)", label)
+                ioList:addItem(text)
+            end
+        end
     end
 end
 
 ioDepositBtn:onClick(function()
+    db.addLog("Executing manual deposit from all IO chests...", "info")
     local moved, _ = db.depositAllIO()
-    db.addLog(string.format("Manual IO Deposit: imported %d items.", moved), "info")
+    db.addLog(string.format("Manual IO Deposit complete: imported %d items.", moved), "info")
+    populateIOList()
     populateItemList(searchInput.text or searchInput.value or "")
 end)
 
@@ -1620,21 +1709,62 @@ local function fetchItems()
     end
 end
 
-itemList:onSelect(function(self, item, index)
-    local itemName = nil
-    if type(index) == "number" and filteredItems[index] then
-        itemName = filteredItems[index]
-    elseif type(item) == "table" then
-        itemName = item.value or (item.args and item.args[1]) or item.name or item.text
-    elseif type(item) == "string" then
-        itemName = item
+local isUpdatingList = false
+
+local function resolveSelectedItemName(self, item, index)
+    local idx = nil
+    if type(index) == "number" then
+        idx = index
+    elseif type(item) == "number" then
+        idx = item
+    elseif self and self.getSelectedIndex then
+        local ok, val = pcall(self.getSelectedIndex, self)
+        if ok and type(val) == "number" then idx = val end
     end
 
+    if idx and filteredItems[idx] then
+        return filteredItems[idx]
+    end
+
+    local itemObj = item or (self and self.getItem and idx and pcall(self.getItem, self, idx) and self:getItem(idx)) or (self and self.getValue and pcall(self.getValue, self) and self:getValue())
+    local strText = nil
+    if type(itemObj) == "table" then
+        if itemObj.value then return itemObj.value end
+        if itemObj.name then return itemObj.name end
+        if itemObj.args and itemObj.args[1] then return itemObj.args[1] end
+        strText = itemObj.text
+    elseif type(itemObj) == "string" then
+        strText = itemObj
+    end
+
+    if strText then
+        local cleanName = strText:match("^%[%p%]%s+(.-)%s+%d+$") or strText:match("^%[%p%]%s+(.+)$") or strText
+        cleanName = cleanName:gsub("^%s*(.-)%s*$", "%1")
+        for _, it in ipairs(currentItems) do
+            if it.displayName == cleanName or it.name == cleanName or cleanName:find(it.displayName, 1, true) then
+                return it.name
+            end
+        end
+    end
+
+    return nil
+end
+
+local function handleSelection(self, item, index)
+    if isUpdatingList then return end
+    local itemName = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
-        populateList()
+        isUpdatingList = true
+        basalt.schedule(function()
+            populateList()
+            isUpdatingList = false
+        end, 0)
     end
-end)
+end
+
+if itemList.onSelect then itemList:onSelect(handleSelection) end
+if itemList.onChange then itemList:onChange(handleSelection) end
 
 searchInput:onChange(function(self, text)
     populateList()
