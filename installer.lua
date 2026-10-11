@@ -622,7 +622,7 @@ end
 
 -- Send RPC request to server and wait for reply
 function net.sendRequest(serverId, command, payload, timeout)
-    timeout = timeout or 3
+    timeout = timeout or 4
     local req = {
         cmd = command,
         payload = payload or {},
@@ -630,11 +630,17 @@ function net.sendRequest(serverId, command, payload, timeout)
     }
     rednet.send(serverId, req, config.data.protocol)
     
-    local senderId, response = rednet.receive(config.data.protocol, timeout)
-    if senderId == serverId and type(response) == "table" then
-        return true, response
+    local startClock = os.clock()
+    while (os.clock() - startClock) < timeout do
+        local remaining = timeout - (os.clock() - startClock)
+        local senderId, response = rednet.receive(config.data.protocol, math.max(0.05, remaining))
+        if senderId == serverId and type(response) == "table" then
+            return true, response
+        elseif not senderId then
+            break
+        end
     end
-    return false, "Request timed out or invalid response"
+    return false, "Request timed out after " .. tostring(timeout) .. "s"
 end
 
 return net
@@ -651,11 +657,11 @@ term.setCursorPos(1, 1)
 local serverId = nil
 local isRemote = false
 
--- Open wireless modem if available & locate storage server
+local myId = os.getComputerID()
 local modemOK, side = net.openWirelessModem()
 if modemOK then
     local sId, _ = net.findServer(2)
-    if sId then
+    if sId and sId ~= myId then
         serverId = sId
         isRemote = true
     end

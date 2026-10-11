@@ -9,11 +9,11 @@ term.setCursorPos(1, 1)
 local serverId = nil
 local isRemote = false
 
--- Open wireless modem if available & locate storage server
+local myId = os.getComputerID()
 local modemOK, side = net.openWirelessModem()
 if modemOK then
     local sId, _ = net.findServer(2)
-    if sId then
+    if sId and sId ~= myId then
         serverId = sId
         isRemote = true
     end
