@@ -410,8 +410,16 @@ local function populateIOList()
 
     -- First list all registered IO chests
     for pName, data in pairs(registered) do
+        local isPresent, actualPName = config.isPeripheralPresent(pName)
         seen[pName] = true
-        local isPresent = peripheral.isPresent(pName)
+        local stripped = pName:match("[^:]+:(.+)") or pName
+        seen[stripped] = true
+        if actualPName then
+            seen[actualPName] = true
+            local actualStripped = actualPName:match("[^:]+:(.+)") or actualPName
+            seen[actualStripped] = true
+        end
+
         local status = isPresent and "[ONLINE]" or "[OFFLINE]"
         local label = data.label or pName
         if #label > 14 then label = label:sub(1, 12) .. ".." end
@@ -419,11 +427,13 @@ local function populateIOList()
         ioList:addItem(text)
     end
 
-    -- Also list all connected inventory peripherals on network
+    -- Also list all remaining connected storage inventories on network
     for _, name in ipairs(allPeripherals) do
         if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") and not name:find("drive") then
-            if not seen[name] and not config.isIOChest(name) then
+            local stripped = name:match("[^:]+:(.+)") or name
+            if not seen[name] and not seen[stripped] and not config.isIOChest(name) then
                 seen[name] = true
+                seen[stripped] = true
                 local label = name
                 if #label > 16 then label = label:sub(1, 14) .. ".." end
                 local text = string.format("[ONLINE]  STORAGE: %-16s (Connected)", label)
@@ -614,6 +624,36 @@ basalt.schedule(function()
                     success = true,
                     chests = config.getIOChests()
                 }
+
+            elseif cmd == "REGISTER_IO_CHEST" then
+                local pName = payload.peripheralName
+                local label = payload.label or pName
+                local x = payload.x or 0
+                local y = payload.y or 0
+                local z = payload.z or 0
+                local role = payload.role or "both"
+
+                if pName then
+                    config.setIOChest(pName, label, x, y, z, role)
+                    db.discoverPeripherals()
+                    db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", pName, label, x, y, z), "info")
+                    response = { success = true, message = "Registered " .. pName .. " on server!" }
+                    populateIOList()
+                else
+                    response = { success = false, message = "Missing peripheralName parameter" }
+                end
+
+            elseif cmd == "REMOVE_IO_CHEST" then
+                local pName = payload.peripheralName
+                if pName then
+                    config.removeIOChest(pName)
+                    db.discoverPeripherals()
+                    db.addLog(string.format("Remote IO Remove: %s", pName), "info")
+                    response = { success = true, message = "Removed " .. pName .. " on server!" }
+                    populateIOList()
+                else
+                    response = { success = false, message = "Missing peripheralName parameter" }
+                end
             end
 
             rednet.send(senderId, response, config.data.protocol)

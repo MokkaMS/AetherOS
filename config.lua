@@ -1,7 +1,7 @@
 -- Configuration management for CC:Tweaked Storage & ME System
 local config = {}
 
-local CONFIG_FILE = "storage_config.json"
+local CONFIG_FILE = "/storage_config.json"
 
 config.data = {
     protocol = "AETHER_VAULT_NET",
@@ -41,19 +41,52 @@ function config.save()
     return false
 end
 
+function config.isPeripheralPresent(peripheralName)
+    if not peripheralName then return false, nil end
+    if peripheral.isPresent(peripheralName) then
+        return true, peripheralName
+    end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for _, name in ipairs(peripheral.getNames()) do
+        local nStripped = name:match("[^:]+:(.+)") or name
+        if nStripped == stripped or name == peripheralName then
+            return true, name
+        end
+    end
+    return false, nil
+end
+
 function config.setIOChest(peripheralName, label, x, y, z, role)
-    config.data.ioChests[peripheralName] = {
-        label = label or peripheralName,
+    if not peripheralName or peripheralName == "" then return end
+    config.load()
+    
+    local present, actualName = config.isPeripheralPresent(peripheralName)
+    local targetName = actualName or peripheralName
+
+    config.data.ioChests[targetName] = {
+        label = label or targetName,
         x = tonumber(x) or 0,
         y = tonumber(y) or 0,
         z = tonumber(z) or 0,
-        role = role or "both" -- "input", "output", "both"
+        role = role or "both"
     }
     config.save()
 end
 
 function config.removeIOChest(peripheralName)
+    config.load()
+    local present, actualName = config.isPeripheralPresent(peripheralName)
     config.data.ioChests[peripheralName] = nil
+    if actualName then
+        config.data.ioChests[actualName] = nil
+    end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for k, _ in pairs(config.data.ioChests) do
+        local kStripped = k:match("[^:]+:(.+)") or k
+        if kStripped == stripped then
+            config.data.ioChests[k] = nil
+        end
+    end
     config.save()
 end
 

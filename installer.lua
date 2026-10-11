@@ -42,7 +42,7 @@ local embeddedFiles = {}
 embeddedFiles["config.lua"] = [=[-- Configuration management for CC:Tweaked Storage & ME System
 local config = {}
 
-local CONFIG_FILE = "storage_config.json"
+local CONFIG_FILE = "/storage_config.json"
 
 config.data = {
     protocol = "AETHER_VAULT_NET",
@@ -82,19 +82,52 @@ function config.save()
     return false
 end
 
+function config.isPeripheralPresent(peripheralName)
+    if not peripheralName then return false, nil end
+    if peripheral.isPresent(peripheralName) then
+        return true, peripheralName
+    end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for _, name in ipairs(peripheral.getNames()) do
+        local nStripped = name:match("[^:]+:(.+)") or name
+        if nStripped == stripped or name == peripheralName then
+            return true, name
+        end
+    end
+    return false, nil
+end
+
 function config.setIOChest(peripheralName, label, x, y, z, role)
-    config.data.ioChests[peripheralName] = {
-        label = label or peripheralName,
+    if not peripheralName or peripheralName == "" then return end
+    config.load()
+    
+    local present, actualName = config.isPeripheralPresent(peripheralName)
+    local targetName = actualName or peripheralName
+
+    config.data.ioChests[targetName] = {
+        label = label or targetName,
         x = tonumber(x) or 0,
         y = tonumber(y) or 0,
         z = tonumber(z) or 0,
-        role = role or "both" -- "input", "output", "both"
+        role = role or "both"
     }
     config.save()
 end
 
 function config.removeIOChest(peripheralName)
+    config.load()
+    local present, actualName = config.isPeripheralPresent(peripheralName)
     config.data.ioChests[peripheralName] = nil
+    if actualName then
+        config.data.ioChests[actualName] = nil
+    end
+    local stripped = peripheralName:match("[^:]+:(.+)") or peripheralName
+    for k, _ in pairs(config.data.ioChests) do
+        local kStripped = k:match("[^:]+:(.+)") or k
+        if kStripped == stripped then
+            config.data.ioChests[k] = nil
+        end
+    end
     config.save()
 end
 
@@ -608,10 +641,25 @@ return net
 ]=]
 
 embeddedFiles["io_config_tool.lua"] = [=[-- Interactive IO Chest Configuration & GPS Calibration Tool
+-- Supports both local server execution and remote execution over Rednet
 local config = require("config")
+local net = require("net_protocol")
 
 term.clear()
 term.setCursorPos(1, 1)
+
+local serverId = nil
+local isRemote = false
+
+-- Open wireless modem if available & locate storage server
+local modemOK, side = net.openWirelessModem()
+if modemOK then
+    local sId, _ = net.findServer(2)
+    if sId then
+        serverId = sId
+        isRemote = true
+    end
+end
 
 local function drawHeader()
     term.clear()
@@ -620,6 +668,12 @@ local function drawHeader()
     print("========================================")
     print("   AetherVault IO & GPS Setup Tool      ")
     print("========================================")
+    term.setTextColor(colors.cyan)
+    if isRemote then
+        print(" Mode: WIRELESS REMOTE (Server #" .. tostring(serverId) .. ")")
+    else
+        print(" Mode: LOCAL STORAGE SERVER")
+    end
     term.setTextColor(colors.white)
     print()
 end
@@ -651,10 +705,73 @@ local function listConnectedInventories()
     return inventories
 end
 
+local function getRemoteIOChests()
+    if not isRemote then
+        return config.getIOChests()
+    end
+    local ok, res = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
+    if ok and res.success and res.chests then
+        return res.chests
+    end
+    return config.getIOChests()
+end
+
+local function registerIOChest(pName, label, x, y, z, role)
+    if isRemote then
+        local payload = {
+            peripheralName = pName,
+            label = label,
+            x = x,
+            y = y,
+            z = z,
+            role = role
+        }
+        local ok, res = net.sendRequest(serverId, "REGISTER_IO_CHEST", payload, 3)
+        if ok and res.success then
+            return true, res.message or "Registered wirelessly on server!"
+        else
+            return false, res and res.message or "RPC call failed"
+        end
+    else
+        config.setIOChest(pName, label, x, y, z, role)
+        return true, "Registered locally in config!"
+    end
+end
+
+local function removeIOChest(pName)
+    if isRemote then
+        local payload = { peripheralName = pName }
+        local ok, res = net.sendRequest(serverId, "REMOVE_IO_CHEST", payload, 3)
+        if ok and res.success then
+            return true, res.message or "Removed wirelessly on server!"
+        else
+            return false, res and res.message or "RPC call failed"
+        end
+    else
+        config.removeIOChest(pName)
+        return true, "Removed locally from config!"
+    end
+end
+
+local function performTestDeposit()
+    if isRemote then
+        local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", {}, 4)
+        if ok and res.success then
+            return res.count or 0, nil
+        else
+            return 0, res and res.message or "RPC call failed"
+        end
+    else
+        local db = require("db")
+        db.scanStorage()
+        return db.depositAllIO()
+    end
+end
+
 local function main()
     while true do
         drawHeader()
-        print("1) List Connected & Configured IO Chests")
+        print("1) List Configured IO Chests")
         print("2) Register / Edit IO Chest (with GPS)")
         print("3) Remove Registered IO Chest")
         print("4) Perform Test Deposit from IO Chest")
@@ -665,13 +782,13 @@ local function main()
 
         if choice == "1" then
             drawHeader()
-            print("Registered IO Chests in config:")
-            local ioChests = config.getIOChests()
+            print("Configured IO Chests on Server:")
+            local ioChests = getRemoteIOChests()
             local count = 0
             for pName, data in pairs(ioChests) do
                 count = count + 1
-                local present = peripheral.isPresent(pName) and "[CONNECTED]" or "[MISSING]"
-                term.setTextColor(present:find("CONNECTED") and colors.green or colors.red)
+                local present = peripheral.isPresent(pName) and "[ONLINE]" or "[REGISTERED]"
+                term.setTextColor(present:find("ONLINE") and colors.green or colors.cyan)
                 print(string.format("- %s (%s) %s", pName, data.label, present))
                 term.setTextColor(colors.lightGray)
                 print(string.format("  Coords: X=%d, Y=%d, Z=%d | Role: %s", data.x, data.y, data.z, data.role))
@@ -690,7 +807,6 @@ local function main()
             local inventories = listConnectedInventories()
             
             if #inventories > 0 then
-                -- Display compact list of up to 10 inventories
                 for i = 1, math.min(#inventories, 10) do
                     local name = inventories[i]
                     local isRegistered = config.isIOChest(name) and " [REG]" or ""
@@ -710,7 +826,6 @@ local function main()
                 if num and inventories[num] then
                     selectedPName = inventories[num]
                 else
-                    -- Search for matching chest name ending with _<inputStr> or containing inputStr
                     local matches = {}
                     for _, pName in ipairs(inventories) do
                         if pName == inputStr or pName:sub(-#("_" .. inputStr)) == ("_" .. inputStr) or pName:find(inputStr, 1, true) then
@@ -732,20 +847,21 @@ local function main()
                             selectedPName = matches[mNum]
                         end
                     else
-                        -- Direct peripheral check fallbacks
                         if peripheral.isPresent(inputStr) then
                             selectedPName = inputStr
                         elseif peripheral.isPresent("minecraft:chest_" .. inputStr) then
                             selectedPName = "minecraft:chest_" .. inputStr
                         elseif peripheral.isPresent("minecraft:barrel_" .. inputStr) then
                             selectedPName = "minecraft:barrel_" .. inputStr
+                        else
+                            selectedPName = inputStr -- allow custom peripheral name
                         end
                     end
                 end
 
                 if not selectedPName then
                     term.setTextColor(colors.red)
-                    print("Could not find connected chest matching '" .. inputStr .. "'!")
+                    print("Could not find chest matching '" .. inputStr .. "'!")
                     write("Press Enter to return...")
                     read()
                 else
@@ -789,10 +905,15 @@ local function main()
                         finalZ = tonumber(read()) or 0
                     end
 
-                    config.setIOChest(pName, label, finalX, finalY, finalZ, role)
-                    term.setTextColor(colors.green)
-                    print()
-                    print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
+                    local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role)
+                    if ok then
+                        term.setTextColor(colors.green)
+                        print()
+                        print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
+                    else
+                        term.setTextColor(colors.red)
+                        print("Error: " .. tostring(msg))
+                    end
                     write("Press Enter to continue...")
                     read()
                 end
@@ -800,7 +921,7 @@ local function main()
 
         elseif choice == "3" then
             drawHeader()
-            local ioChests = config.getIOChests()
+            local ioChests = getRemoteIOChests()
             local list = {}
             for pName, data in pairs(ioChests) do
                 table.insert(list, pName)
@@ -813,21 +934,23 @@ local function main()
                 write("Select chest number to remove: ")
                 local num = tonumber(read())
                 if num and list[num] then
-                    config.removeIOChest(list[num])
-                    term.setTextColor(colors.green)
-                    print("Removed " .. list[num])
+                    local ok, msg = removeIOChest(list[num])
+                    if ok then
+                        term.setTextColor(colors.green)
+                        print("Removed " .. list[num])
+                    else
+                        term.setTextColor(colors.red)
+                        print("Error: " .. tostring(msg))
+                    end
                 end
             end
             write("Press Enter to continue...")
             read()
 
         elseif choice == "4" then
-            local db = require("db")
             drawHeader()
-            print("Scanning storage network...")
-            db.scanStorage()
-            print("Performing test deposit from IO chests...")
-            local count, err = db.depositAllIO()
+            print("Performing deposit from IO chests...")
+            local count, err = performTestDeposit()
             if err then
                 term.setTextColor(colors.red)
                 print("Error: " .. tostring(err))
@@ -1261,8 +1384,16 @@ local function populateIOList()
 
     -- First list all registered IO chests
     for pName, data in pairs(registered) do
+        local isPresent, actualPName = config.isPeripheralPresent(pName)
         seen[pName] = true
-        local isPresent = peripheral.isPresent(pName)
+        local stripped = pName:match("[^:]+:(.+)") or pName
+        seen[stripped] = true
+        if actualPName then
+            seen[actualPName] = true
+            local actualStripped = actualPName:match("[^:]+:(.+)") or actualPName
+            seen[actualStripped] = true
+        end
+
         local status = isPresent and "[ONLINE]" or "[OFFLINE]"
         local label = data.label or pName
         if #label > 14 then label = label:sub(1, 12) .. ".." end
@@ -1270,11 +1401,13 @@ local function populateIOList()
         ioList:addItem(text)
     end
 
-    -- Also list all connected inventory peripherals on network
+    -- Also list all remaining connected storage inventories on network
     for _, name in ipairs(allPeripherals) do
         if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") and not name:find("drive") then
-            if not seen[name] and not config.isIOChest(name) then
+            local stripped = name:match("[^:]+:(.+)") or name
+            if not seen[name] and not seen[stripped] and not config.isIOChest(name) then
                 seen[name] = true
+                seen[stripped] = true
                 local label = name
                 if #label > 16 then label = label:sub(1, 14) .. ".." end
                 local text = string.format("[ONLINE]  STORAGE: %-16s (Connected)", label)
@@ -1465,6 +1598,36 @@ basalt.schedule(function()
                     success = true,
                     chests = config.getIOChests()
                 }
+
+            elseif cmd == "REGISTER_IO_CHEST" then
+                local pName = payload.peripheralName
+                local label = payload.label or pName
+                local x = payload.x or 0
+                local y = payload.y or 0
+                local z = payload.z or 0
+                local role = payload.role or "both"
+
+                if pName then
+                    config.setIOChest(pName, label, x, y, z, role)
+                    db.discoverPeripherals()
+                    db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", pName, label, x, y, z), "info")
+                    response = { success = true, message = "Registered " .. pName .. " on server!" }
+                    populateIOList()
+                else
+                    response = { success = false, message = "Missing peripheralName parameter" }
+                end
+
+            elseif cmd == "REMOVE_IO_CHEST" then
+                local pName = payload.peripheralName
+                if pName then
+                    config.removeIOChest(pName)
+                    db.discoverPeripherals()
+                    db.addLog(string.format("Remote IO Remove: %s", pName), "info")
+                    response = { success = true, message = "Removed " .. pName .. " on server!" }
+                    populateIOList()
+                else
+                    response = { success = false, message = "Missing peripheralName parameter" }
+                end
             end
 
             rednet.send(senderId, response, config.data.protocol)
