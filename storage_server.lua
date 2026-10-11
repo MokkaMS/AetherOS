@@ -13,12 +13,12 @@ if not basaltOK then
 end
 
 -- Initialize network
-local modemOK, modemSide = net.openWirelessModem()
+local modemOK, modemSide = net.openModem()
 if modemOK then
     rednet.host(config.data.protocol, config.data.hostname)
-    db.addLog("Wireless Rednet started on " .. modemSide .. " (" .. config.data.hostname .. ")", "system")
+    db.addLog("Rednet started on " .. modemSide .. " (" .. config.data.hostname .. ")", "system")
 else
-    db.addLog("Warning: No wireless modem active. Remote pocket computer control disabled.", "warning")
+    db.addLog("Warning: No modem active. Remote pocket computer & client control disabled.", "warning")
 end
 
 -- Get terminal dimensions dynamically
@@ -546,14 +546,12 @@ tabSettingsBtn:onClick(function() setActiveTab("settings") end)
 setActiveTab("items")
 
 ---------------------------------------------------------
--- BACKGROUND REDNET LISTENER (NON-BLOCKING SCHEDULE)
+-- BACKGROUND REDNET LISTENER (COROUTINE THREAD)
 ---------------------------------------------------------
 basalt.schedule(function()
     while true do
-        local senderId, message, protocol = rednet.receive(config.data.protocol, 0)
-        if not senderId then break end
-
-        if type(message) == "table" and message.cmd then
+        local event, senderId, message, protocol = os.pullEvent("rednet_message")
+        if protocol == config.data.protocol and type(message) == "table" and message.cmd then
             local cmd = message.cmd
             local payload = message.payload or {}
             local response = { success = false, message = "Unknown command" }
@@ -583,6 +581,30 @@ basalt.schedule(function()
                     response = { success = false, message = "No IO chest available on network!" }
                 else
                     local moved, err = db.withdraw(itemName, count, targetIO)
+                    if err then
+                        response = { success = false, message = err }
+                    else
+                        response = {
+                            success = true,
+                            moved = moved,
+                            targetChest = targetIO,
+                            chestLabel = info and info.label or targetIO,
+                            distance = dist,
+                            message = string.format("Withdrew %d items to %s", moved, info and info.label or targetIO)
+                        }
+                    end
+                end
+
+            elseif cmd == "WITHDRAW_MULTI" then
+                local requests = payload.requests or {}
+                local gpsPos = payload.gpsPos
+
+                local targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
+                
+                if not targetIO then
+                    response = { success = false, message = "No IO chest available on network!" }
+                else
+                    local moved, err = db.withdrawMulti(requests, targetIO)
                     if err then
                         response = { success = false, message = err }
                     else
@@ -639,6 +661,7 @@ basalt.schedule(function()
                     db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", pName, label, x, y, z), "info")
                     response = { success = true, message = "Registered " .. pName .. " on server!" }
                     populateIOList()
+                    updateStatsDisplay()
                 else
                     response = { success = false, message = "Missing peripheralName parameter" }
                 end
@@ -651,6 +674,7 @@ basalt.schedule(function()
                     db.addLog(string.format("Remote IO Remove: %s", pName), "info")
                     response = { success = true, message = "Removed " .. pName .. " on server!" }
                     populateIOList()
+                    updateStatsDisplay()
                 else
                     response = { success = false, message = "Missing peripheralName parameter" }
                 end
@@ -660,16 +684,22 @@ basalt.schedule(function()
             populateItemList(searchInput.text or searchInput.value or "")
         end
     end
-end, 0.1)
+end)
 
+---------------------------------------------------------
+-- BACKGROUND PERIODIC STORAGE SCANNER (COROUTINE THREAD)
+---------------------------------------------------------
 basalt.schedule(function()
-    if config.data.autoDeposit then
-        db.depositAllIO()
-    else
-        db.scanStorage()
+    while true do
+        sleep(config.data.scanInterval or 5)
+        if config.data.autoDeposit then
+            db.depositAllIO()
+        else
+            db.scanStorage()
+        end
+        updateStatsDisplay()
     end
-    updateStatsDisplay()
-end, config.data.scanInterval or 5)
+end)
 
 if basalt.run then
     basalt.run()

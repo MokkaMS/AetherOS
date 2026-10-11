@@ -3,41 +3,38 @@ local config = require("config")
 
 local net = {}
 
--- Open wireless modem on computer if available
-function net.openWirelessModem()
-    local openedSide = nil
-    local names = peripheral.getNames()
-    
-    for _, name in ipairs(names) do
-        if peripheral.getType(name) == "modem" then
-            local p = peripheral.wrap(name)
-            if p and p.isWireless and p.isWireless() then
-                rednet.open(name)
-                openedSide = name
-            end
-        end
-    end
-    
-    if openedSide then
-        return true, openedSide
-    end
+-- Open all attached modems (wired and wireless) on local computer sides
+function net.openModem()
+    local openedCount = 0
+    local openedSides = {}
 
-    -- Fallback check standard sides
     for _, side in ipairs(rs.getSides()) do
         if peripheral.isPresent(side) and peripheral.getType(side) == "modem" then
-            local p = peripheral.wrap(side)
-            if p and p.isWireless and p.isWireless() then
-                rednet.open(side)
-                return true, side
+            if not rednet.isOpen(side) then
+                local ok = pcall(rednet.open, side)
+                if ok then
+                    openedCount = openedCount + 1
+                    table.insert(openedSides, side)
+                end
+            else
+                openedCount = openedCount + 1
+                table.insert(openedSides, side)
             end
         end
     end
-    return false, "No wireless modem found!"
+
+    if openedCount > 0 then
+        return true, table.concat(openedSides, ", ")
+    end
+    return false, "No modem attached!"
 end
 
--- Find server on wireless network using lookup, broadcast ping, or direct server ID
+-- Backward compatibility alias
+net.openWirelessModem = net.openModem
+
+-- Find server on network using lookup, broadcast ping, or direct server ID
 function net.findServer(timeout, targetServerId)
-    timeout = timeout or 2
+    timeout = timeout or 3
     
     -- If user provided exact Server ID, check it first
     if targetServerId and tonumber(targetServerId) then
@@ -55,9 +52,15 @@ function net.findServer(timeout, targetServerId)
 
     -- Method 2: Broadcast PING
     rednet.broadcast({ cmd = "PING" }, config.data.protocol)
-    local senderId, res = rednet.receive(config.data.protocol, timeout)
-    if senderId and type(res) == "table" and res.success then
-        return senderId
+    local startClock = os.clock()
+    while (os.clock() - startClock) < timeout do
+        local remaining = timeout - (os.clock() - startClock)
+        local senderId, res = rednet.receive(config.data.protocol, math.max(0.05, remaining))
+        if senderId and type(res) == "table" and res.success then
+            return senderId
+        elseif not senderId then
+            break
+        end
     end
 
     return nil, "Storage Server not found on protocol " .. config.data.protocol

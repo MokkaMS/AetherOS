@@ -560,41 +560,38 @@ local config = require("config")
 
 local net = {}
 
--- Open wireless modem on computer if available
-function net.openWirelessModem()
-    local openedSide = nil
-    local names = peripheral.getNames()
-    
-    for _, name in ipairs(names) do
-        if peripheral.getType(name) == "modem" then
-            local p = peripheral.wrap(name)
-            if p and p.isWireless and p.isWireless() then
-                rednet.open(name)
-                openedSide = name
-            end
-        end
-    end
-    
-    if openedSide then
-        return true, openedSide
-    end
+-- Open all attached modems (wired and wireless) on local computer sides
+function net.openModem()
+    local openedCount = 0
+    local openedSides = {}
 
-    -- Fallback check standard sides
     for _, side in ipairs(rs.getSides()) do
         if peripheral.isPresent(side) and peripheral.getType(side) == "modem" then
-            local p = peripheral.wrap(side)
-            if p and p.isWireless and p.isWireless() then
-                rednet.open(side)
-                return true, side
+            if not rednet.isOpen(side) then
+                local ok = pcall(rednet.open, side)
+                if ok then
+                    openedCount = openedCount + 1
+                    table.insert(openedSides, side)
+                end
+            else
+                openedCount = openedCount + 1
+                table.insert(openedSides, side)
             end
         end
     end
-    return false, "No wireless modem found!"
+
+    if openedCount > 0 then
+        return true, table.concat(openedSides, ", ")
+    end
+    return false, "No modem attached!"
 end
 
--- Find server on wireless network using lookup, broadcast ping, or direct server ID
+-- Backward compatibility alias
+net.openWirelessModem = net.openModem
+
+-- Find server on network using lookup, broadcast ping, or direct server ID
 function net.findServer(timeout, targetServerId)
-    timeout = timeout or 2
+    timeout = timeout or 3
     
     -- If user provided exact Server ID, check it first
     if targetServerId and tonumber(targetServerId) then
@@ -612,9 +609,15 @@ function net.findServer(timeout, targetServerId)
 
     -- Method 2: Broadcast PING
     rednet.broadcast({ cmd = "PING" }, config.data.protocol)
-    local senderId, res = rednet.receive(config.data.protocol, timeout)
-    if senderId and type(res) == "table" and res.success then
-        return senderId
+    local startClock = os.clock()
+    while (os.clock() - startClock) < timeout do
+        local remaining = timeout - (os.clock() - startClock)
+        local senderId, res = rednet.receive(config.data.protocol, math.max(0.05, remaining))
+        if senderId and type(res) == "table" and res.success then
+            return senderId
+        elseif not senderId then
+            break
+        end
     end
 
     return nil, "Storage Server not found on protocol " .. config.data.protocol
@@ -654,18 +657,29 @@ local net = require("net_protocol")
 term.clear()
 term.setCursorPos(1, 1)
 
+local myId = os.getComputerID()
 local serverId = nil
 local isRemote = false
+local modemOK, side = nil, nil
 
-local myId = os.getComputerID()
-local modemOK, side = net.openWirelessModem()
-if modemOK then
-    local sId, _ = net.findServer(2)
-    if sId and sId ~= myId then
-        serverId = sId
-        isRemote = true
+local function refreshConnection(targetId)
+    modemOK, side = net.openModem()
+    serverId = nil
+    isRemote = false
+    if modemOK then
+        local sId, _ = net.findServer(3, targetId)
+        if sId and sId ~= myId then
+            serverId = sId
+            isRemote = true
+        elseif sId == myId then
+            serverId = myId
+            isRemote = false
+        end
     end
+    return isRemote, serverId
 end
+
+refreshConnection()
 
 local function drawHeader()
     term.clear()
@@ -676,9 +690,13 @@ local function drawHeader()
     print("========================================")
     term.setTextColor(colors.cyan)
     if isRemote then
-        print(" Mode: WIRELESS REMOTE (Server #" .. tostring(serverId) .. ")")
+        print(" Mode: NETWORK CLIENT -> Server #" .. tostring(serverId))
+    elseif serverId == myId then
+        print(" Mode: LOCAL STORAGE SERVER (ID #" .. tostring(myId) .. ")")
+    elseif not modemOK then
+        print(" Mode: LOCAL STANDALONE (No modem attached)")
     else
-        print(" Mode: LOCAL STORAGE SERVER")
+        print(" Mode: STANDALONE (Storage Server not found)")
     end
     term.setTextColor(colors.white)
     print()
@@ -732,11 +750,12 @@ local function registerIOChest(pName, label, x, y, z, role)
             z = z,
             role = role
         }
-        local ok, res = net.sendRequest(serverId, "REGISTER_IO_CHEST", payload, 3)
+        local ok, res = net.sendRequest(serverId, "REGISTER_IO_CHEST", payload, 4)
         if ok and res.success then
-            return true, res.message or "Registered wirelessly on server!"
+            return true, res.message or "Registered remotely on server!"
         else
-            return false, res and res.message or "RPC call failed"
+            local errDetail = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "RPC call failed"
+            return false, errDetail
         end
     else
         config.setIOChest(pName, label, x, y, z, role)
@@ -747,11 +766,12 @@ end
 local function removeIOChest(pName)
     if isRemote then
         local payload = { peripheralName = pName }
-        local ok, res = net.sendRequest(serverId, "REMOVE_IO_CHEST", payload, 3)
+        local ok, res = net.sendRequest(serverId, "REMOVE_IO_CHEST", payload, 4)
         if ok and res.success then
-            return true, res.message or "Removed wirelessly on server!"
+            return true, res.message or "Removed remotely on server!"
         else
-            return false, res and res.message or "RPC call failed"
+            local errDetail = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "RPC call failed"
+            return false, errDetail
         end
     else
         config.removeIOChest(pName)
@@ -761,11 +781,12 @@ end
 
 local function performTestDeposit()
     if isRemote then
-        local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", {}, 4)
+        local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", {}, 5)
         if ok and res.success then
             return res.count or 0, nil
         else
-            return 0, res and res.message or "RPC call failed"
+            local errDetail = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "RPC call failed"
+            return 0, errDetail
         end
     else
         local db = require("db")
@@ -781,9 +802,10 @@ local function main()
         print("2) Register / Edit IO Chest (with GPS)")
         print("3) Remove Registered IO Chest")
         print("4) Perform Test Deposit from IO Chest")
-        print("5) Exit")
+        print("5) Reconnect to Server / Set Server ID")
+        print("6) Exit")
         print()
-        write("Select option (1-5): ")
+        write("Select option (1-6): ")
         local choice = read()
 
         if choice == "1" then
@@ -911,14 +933,28 @@ local function main()
                         finalZ = tonumber(read()) or 0
                     end
 
-                    local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role)
-                    if ok then
-                        term.setTextColor(colors.green)
-                        print()
-                        print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
-                    else
-                        term.setTextColor(colors.red)
-                        print("Error: " .. tostring(msg))
+                    local proceed = true
+                    if not isRemote and serverId == nil then
+                        term.setTextColor(colors.yellow)
+                        write("Warning: Not connected to Storage Server! Register locally on this computer? (y/N): ")
+                        local confirm = read():lower()
+                        if confirm ~= "y" then
+                            proceed = false
+                            term.setTextColor(colors.white)
+                            print("Registration cancelled.")
+                        end
+                    end
+
+                    if proceed then
+                        local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role)
+                        if ok then
+                            term.setTextColor(colors.green)
+                            print()
+                            print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
+                        else
+                            term.setTextColor(colors.red)
+                            print("Error: " .. tostring(msg))
+                        end
                     end
                     write("Press Enter to continue...")
                     read()
@@ -968,6 +1004,40 @@ local function main()
             read()
 
         elseif choice == "5" then
+            drawHeader()
+            print("Searching for Storage Server on network...")
+            local okRem, sId = refreshConnection()
+            if okRem then
+                term.setTextColor(colors.green)
+                print(string.format("Connected to Storage Server #%d over network!", sId))
+            else
+                term.setTextColor(colors.orange)
+                print("Auto-discovery could not locate Storage Server.")
+                print()
+                write("Enter Server Computer ID manually (or press Enter to cancel): ")
+                local manualStr = read()
+                local manualId = tonumber(manualStr)
+                if manualId then
+                    print("Pinging Server #" .. tostring(manualId) .. "...")
+                    local okRem2, sId2 = refreshConnection(manualId)
+                    if okRem2 then
+                        term.setTextColor(colors.green)
+                        print(string.format("Successfully connected to Server #%d!", sId2))
+                    elseif sId2 == myId then
+                        term.setTextColor(colors.green)
+                        print("Target ID is this local computer.")
+                    else
+                        term.setTextColor(colors.red)
+                        print(string.format("Server #%d did not respond to PING.", manualId))
+                    end
+                end
+            end
+            term.setTextColor(colors.white)
+            print()
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "6" then
             term.clear()
             term.setCursorPos(1, 1)
             break
@@ -993,12 +1063,12 @@ if not basaltOK then
 end
 
 -- Initialize network
-local modemOK, modemSide = net.openWirelessModem()
+local modemOK, modemSide = net.openModem()
 if modemOK then
     rednet.host(config.data.protocol, config.data.hostname)
-    db.addLog("Wireless Rednet started on " .. modemSide .. " (" .. config.data.hostname .. ")", "system")
+    db.addLog("Rednet started on " .. modemSide .. " (" .. config.data.hostname .. ")", "system")
 else
-    db.addLog("Warning: No wireless modem active. Remote pocket computer control disabled.", "warning")
+    db.addLog("Warning: No modem active. Remote pocket computer & client control disabled.", "warning")
 end
 
 -- Get terminal dimensions dynamically
@@ -1526,14 +1596,12 @@ tabSettingsBtn:onClick(function() setActiveTab("settings") end)
 setActiveTab("items")
 
 ---------------------------------------------------------
--- BACKGROUND REDNET LISTENER (NON-BLOCKING SCHEDULE)
+-- BACKGROUND REDNET LISTENER (COROUTINE THREAD)
 ---------------------------------------------------------
 basalt.schedule(function()
     while true do
-        local senderId, message, protocol = rednet.receive(config.data.protocol, 0)
-        if not senderId then break end
-
-        if type(message) == "table" and message.cmd then
+        local event, senderId, message, protocol = os.pullEvent("rednet_message")
+        if protocol == config.data.protocol and type(message) == "table" and message.cmd then
             local cmd = message.cmd
             local payload = message.payload or {}
             local response = { success = false, message = "Unknown command" }
@@ -1563,6 +1631,30 @@ basalt.schedule(function()
                     response = { success = false, message = "No IO chest available on network!" }
                 else
                     local moved, err = db.withdraw(itemName, count, targetIO)
+                    if err then
+                        response = { success = false, message = err }
+                    else
+                        response = {
+                            success = true,
+                            moved = moved,
+                            targetChest = targetIO,
+                            chestLabel = info and info.label or targetIO,
+                            distance = dist,
+                            message = string.format("Withdrew %d items to %s", moved, info and info.label or targetIO)
+                        }
+                    end
+                end
+
+            elseif cmd == "WITHDRAW_MULTI" then
+                local requests = payload.requests or {}
+                local gpsPos = payload.gpsPos
+
+                local targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
+                
+                if not targetIO then
+                    response = { success = false, message = "No IO chest available on network!" }
+                else
+                    local moved, err = db.withdrawMulti(requests, targetIO)
                     if err then
                         response = { success = false, message = err }
                     else
@@ -1619,6 +1711,7 @@ basalt.schedule(function()
                     db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", pName, label, x, y, z), "info")
                     response = { success = true, message = "Registered " .. pName .. " on server!" }
                     populateIOList()
+                    updateStatsDisplay()
                 else
                     response = { success = false, message = "Missing peripheralName parameter" }
                 end
@@ -1631,6 +1724,7 @@ basalt.schedule(function()
                     db.addLog(string.format("Remote IO Remove: %s", pName), "info")
                     response = { success = true, message = "Removed " .. pName .. " on server!" }
                     populateIOList()
+                    updateStatsDisplay()
                 else
                     response = { success = false, message = "Missing peripheralName parameter" }
                 end
@@ -1640,16 +1734,22 @@ basalt.schedule(function()
             populateItemList(searchInput.text or searchInput.value or "")
         end
     end
-end, 0.1)
+end)
 
+---------------------------------------------------------
+-- BACKGROUND PERIODIC STORAGE SCANNER (COROUTINE THREAD)
+---------------------------------------------------------
 basalt.schedule(function()
-    if config.data.autoDeposit then
-        db.depositAllIO()
-    else
-        db.scanStorage()
+    while true do
+        sleep(config.data.scanInterval or 5)
+        if config.data.autoDeposit then
+            db.depositAllIO()
+        else
+            db.scanStorage()
+        end
+        updateStatsDisplay()
     end
-    updateStatsDisplay()
-end, config.data.scanInterval or 5)
+end)
 
 if basalt.run then
     basalt.run()

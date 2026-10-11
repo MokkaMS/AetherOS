@@ -6,18 +6,29 @@ local net = require("net_protocol")
 term.clear()
 term.setCursorPos(1, 1)
 
+local myId = os.getComputerID()
 local serverId = nil
 local isRemote = false
+local modemOK, side = nil, nil
 
-local myId = os.getComputerID()
-local modemOK, side = net.openWirelessModem()
-if modemOK then
-    local sId, _ = net.findServer(2)
-    if sId and sId ~= myId then
-        serverId = sId
-        isRemote = true
+local function refreshConnection(targetId)
+    modemOK, side = net.openModem()
+    serverId = nil
+    isRemote = false
+    if modemOK then
+        local sId, _ = net.findServer(3, targetId)
+        if sId and sId ~= myId then
+            serverId = sId
+            isRemote = true
+        elseif sId == myId then
+            serverId = myId
+            isRemote = false
+        end
     end
+    return isRemote, serverId
 end
+
+refreshConnection()
 
 local function drawHeader()
     term.clear()
@@ -28,9 +39,13 @@ local function drawHeader()
     print("========================================")
     term.setTextColor(colors.cyan)
     if isRemote then
-        print(" Mode: WIRELESS REMOTE (Server #" .. tostring(serverId) .. ")")
+        print(" Mode: NETWORK CLIENT -> Server #" .. tostring(serverId))
+    elseif serverId == myId then
+        print(" Mode: LOCAL STORAGE SERVER (ID #" .. tostring(myId) .. ")")
+    elseif not modemOK then
+        print(" Mode: LOCAL STANDALONE (No modem attached)")
     else
-        print(" Mode: LOCAL STORAGE SERVER")
+        print(" Mode: STANDALONE (Storage Server not found)")
     end
     term.setTextColor(colors.white)
     print()
@@ -84,11 +99,12 @@ local function registerIOChest(pName, label, x, y, z, role)
             z = z,
             role = role
         }
-        local ok, res = net.sendRequest(serverId, "REGISTER_IO_CHEST", payload, 3)
+        local ok, res = net.sendRequest(serverId, "REGISTER_IO_CHEST", payload, 4)
         if ok and res.success then
-            return true, res.message or "Registered wirelessly on server!"
+            return true, res.message or "Registered remotely on server!"
         else
-            return false, res and res.message or "RPC call failed"
+            local errDetail = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "RPC call failed"
+            return false, errDetail
         end
     else
         config.setIOChest(pName, label, x, y, z, role)
@@ -99,11 +115,12 @@ end
 local function removeIOChest(pName)
     if isRemote then
         local payload = { peripheralName = pName }
-        local ok, res = net.sendRequest(serverId, "REMOVE_IO_CHEST", payload, 3)
+        local ok, res = net.sendRequest(serverId, "REMOVE_IO_CHEST", payload, 4)
         if ok and res.success then
-            return true, res.message or "Removed wirelessly on server!"
+            return true, res.message or "Removed remotely on server!"
         else
-            return false, res and res.message or "RPC call failed"
+            local errDetail = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "RPC call failed"
+            return false, errDetail
         end
     else
         config.removeIOChest(pName)
@@ -113,11 +130,12 @@ end
 
 local function performTestDeposit()
     if isRemote then
-        local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", {}, 4)
+        local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", {}, 5)
         if ok and res.success then
             return res.count or 0, nil
         else
-            return 0, res and res.message or "RPC call failed"
+            local errDetail = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "RPC call failed"
+            return 0, errDetail
         end
     else
         local db = require("db")
@@ -133,9 +151,10 @@ local function main()
         print("2) Register / Edit IO Chest (with GPS)")
         print("3) Remove Registered IO Chest")
         print("4) Perform Test Deposit from IO Chest")
-        print("5) Exit")
+        print("5) Reconnect to Server / Set Server ID")
+        print("6) Exit")
         print()
-        write("Select option (1-5): ")
+        write("Select option (1-6): ")
         local choice = read()
 
         if choice == "1" then
@@ -263,14 +282,28 @@ local function main()
                         finalZ = tonumber(read()) or 0
                     end
 
-                    local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role)
-                    if ok then
-                        term.setTextColor(colors.green)
-                        print()
-                        print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
-                    else
-                        term.setTextColor(colors.red)
-                        print("Error: " .. tostring(msg))
+                    local proceed = true
+                    if not isRemote and serverId == nil then
+                        term.setTextColor(colors.yellow)
+                        write("Warning: Not connected to Storage Server! Register locally on this computer? (y/N): ")
+                        local confirm = read():lower()
+                        if confirm ~= "y" then
+                            proceed = false
+                            term.setTextColor(colors.white)
+                            print("Registration cancelled.")
+                        end
+                    end
+
+                    if proceed then
+                        local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role)
+                        if ok then
+                            term.setTextColor(colors.green)
+                            print()
+                            print(string.format("Successfully registered '%s' (%s) at [%d, %d, %d]!", pName, label, finalX, finalY, finalZ))
+                        else
+                            term.setTextColor(colors.red)
+                            print("Error: " .. tostring(msg))
+                        end
                     end
                     write("Press Enter to continue...")
                     read()
@@ -320,6 +353,40 @@ local function main()
             read()
 
         elseif choice == "5" then
+            drawHeader()
+            print("Searching for Storage Server on network...")
+            local okRem, sId = refreshConnection()
+            if okRem then
+                term.setTextColor(colors.green)
+                print(string.format("Connected to Storage Server #%d over network!", sId))
+            else
+                term.setTextColor(colors.orange)
+                print("Auto-discovery could not locate Storage Server.")
+                print()
+                write("Enter Server Computer ID manually (or press Enter to cancel): ")
+                local manualStr = read()
+                local manualId = tonumber(manualStr)
+                if manualId then
+                    print("Pinging Server #" .. tostring(manualId) .. "...")
+                    local okRem2, sId2 = refreshConnection(manualId)
+                    if okRem2 then
+                        term.setTextColor(colors.green)
+                        print(string.format("Successfully connected to Server #%d!", sId2))
+                    elseif sId2 == myId then
+                        term.setTextColor(colors.green)
+                        print("Target ID is this local computer.")
+                    else
+                        term.setTextColor(colors.red)
+                        print(string.format("Server #%d did not respond to PING.", manualId))
+                    end
+                end
+            end
+            term.setTextColor(colors.white)
+            print()
+            write("Press Enter to continue...")
+            read()
+
+        elseif choice == "6" then
             term.clear()
             term.setCursorPos(1, 1)
             break
