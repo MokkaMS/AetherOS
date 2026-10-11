@@ -47,7 +47,7 @@ local CONFIG_FILE = "/storage_config.json"
 config.data = {
     protocol = "AETHER_VAULT_NET",
     hostname = "aether_vault_server",
-    scanInterval = 5, -- seconds between automatic inventory scans
+    scanInterval = 15, -- seconds between automatic inventory scans
     autoDeposit = true, -- automatically import items placed in IO chests during scan
     ioChests = {}, -- format: { [peripheralName] = { label = "Main IO", x = 0, y = 64, z = 0, role = "both" } }
     ignoredPeripherals = {}, -- peripheral names to ignore (e.g., drives, turtle inventories, non-storage)
@@ -234,9 +234,15 @@ local function isValidInventory(name)
     return isInv
 end
 
+local lastPeripheralCount = 0
+
 -- Find all connected inventory peripherals on wired modem network
-function db.discoverPeripherals()
+function db.discoverPeripherals(force)
     local names = peripheral.getNames()
+    if not force and #db.storageChests > 0 and #names == lastPeripheralCount then
+        return db.storageChests, db.ioChests
+    end
+    lastPeripheralCount = #names
     local storage = {}
     local io = {}
 
@@ -1295,7 +1301,46 @@ local withdrawBox = itemsFrame:addFrame()
 local withdrawQtyInput = withdrawBox:addInput()
     :setPosition(1, 1)
     :setSize(6, 1)
+    :setBackground(colors.white)
+    :setForeground(colors.black)
 withdrawQtyInput.text = "64"
+
+local withdrawQtyHighlighted = false
+
+local function setWithdrawQtyHighlight(highlight)
+    withdrawQtyHighlighted = highlight
+    if highlight then
+        withdrawQtyInput:setBackground(colors.lightBlue):setForeground(colors.black)
+    else
+        withdrawQtyInput:setBackground(colors.white):setForeground(colors.black)
+    end
+end
+
+withdrawQtyInput:onClick(function(self)
+    if withdrawQtyHighlighted then
+        self.text = ""
+        if self.setValue then pcall(self.setValue, self, "") end
+        if self.setText then pcall(self.setText, self, "") end
+        setWithdrawQtyHighlight(false)
+    else
+        setWithdrawQtyHighlight(true)
+    end
+end)
+
+withdrawQtyInput:onChange(function(self, text)
+    if withdrawQtyHighlighted then
+        withdrawQtyHighlighted = false
+        setWithdrawQtyHighlight(false)
+        local clean = text or ""
+        local newChar = clean:sub(-1)
+        if not newChar:match("%d") then
+            newChar = clean:match("%d") or ""
+        end
+        self.text = newChar
+        if self.setValue then pcall(self.setValue, self, newChar) end
+        if self.setText then pcall(self.setText, self, newChar) end
+    end
+end)
 
 local pullAllMode = false
 
@@ -1361,7 +1406,35 @@ local function updateAutoComplete(filterText)
     end
 end
 
+local function updateListItemAt(idx, itemName)
+    if not idx or not itemName then return end
+    local isSel = selectedItems[itemName]
+    local prefix = isSel and "[x] " or "[ ] "
+    local maxNameLen = math.max(10, termW - 14)
+    local itemData = db.items[itemName]
+    local dispName = itemData and itemData.displayName or itemName
+    if #dispName > maxNameLen then
+        dispName = dispName:sub(1, maxNameLen - 2) .. ".."
+    end
+    local total = itemData and itemData.total or 0
+    local entryText = string.format("%s%-" .. maxNameLen .. "s %6d", prefix, dispName, total)
+    if itemList.editItem then
+        pcall(itemList.editItem, itemList, idx, entryText)
+    elseif itemList.getItem then
+        local ok, itObj = pcall(itemList.getItem, itemList, idx)
+        if ok and type(itObj) == "table" then
+            itObj.text = entryText
+        end
+    end
+end
+
 local function populateItemList(filter)
+    local prevOffset = nil
+    if itemList.getOffset then
+        local ok, off = pcall(itemList.getOffset, itemList)
+        if ok and type(off) == "number" then prevOffset = off end
+    end
+
     itemList:clear()
     filteredItems = {}
     filter = filter and filter:lower() or ""
@@ -1382,6 +1455,11 @@ local function populateItemList(filter)
             table.insert(filteredItems, item.name)
         end
     end
+
+    if prevOffset and itemList.setOffset then
+        pcall(itemList.setOffset, itemList, prevOffset)
+    end
+
     updateStatsDisplay()
     updateWithdrawButtonText()
     updateAutoComplete(filter)
@@ -1401,15 +1479,15 @@ local function resolveSelectedItemName(self, item, index)
     end
 
     if idx and filteredItems[idx] then
-        return filteredItems[idx]
+        return filteredItems[idx], idx
     end
 
     local itemObj = item or (self and self.getItem and idx and pcall(self.getItem, self, idx) and self:getItem(idx)) or (self and self.getValue and pcall(self.getValue, self) and self:getValue())
     local strText = nil
     if type(itemObj) == "table" then
-        if itemObj.value then return itemObj.value end
-        if itemObj.name then return itemObj.name end
-        if itemObj.args and itemObj.args[1] then return itemObj.args[1] end
+        if itemObj.value then return itemObj.value, idx end
+        if itemObj.name then return itemObj.name, idx end
+        if itemObj.args and itemObj.args[1] then return itemObj.args[1], idx end
         strText = itemObj.text
     elseif type(itemObj) == "string" then
         strText = itemObj
@@ -1418,26 +1496,32 @@ local function resolveSelectedItemName(self, item, index)
     if strText then
         local cleanName = strText:match("^%[%p%]%s+(.-)%s+%d+$") or strText:match("^%[%p%]%s+(.+)$") or strText
         cleanName = cleanName:gsub("^%s*(.-)%s*$", "%1")
-        for _, it in ipairs(db.itemIndex) do
+        for i, it in ipairs(db.itemIndex) do
             if it.displayName == cleanName or it.name == cleanName or cleanName:find(it.displayName, 1, true) then
-                return it.name
+                return it.name, idx
             end
         end
     end
 
-    return nil
+    return nil, nil
 end
 
 local function handleSelection(self, item, index)
     if isUpdatingList then return end
-    local itemName = resolveSelectedItemName(self, item, index)
+    setWithdrawQtyHighlight(false)
+    local itemName, idx = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
-        isUpdatingList = true
-        basalt.schedule(function()
-            populateItemList(searchInput.text or searchInput.value or "")
-            isUpdatingList = false
-        end, 0)
+        if idx and itemList.editItem then
+            updateListItemAt(idx, itemName)
+            updateWithdrawButtonText()
+        else
+            isUpdatingList = true
+            basalt.schedule(function()
+                populateItemList(searchInput.text or searchInput.value or "")
+                isUpdatingList = false
+            end, 0)
+        end
     end
 end
 
@@ -1619,13 +1703,35 @@ settingsFrame.visible = false
 
 settingsFrame:addLabel():setPosition(2, 2):setText("Protocol: " .. config.data.protocol)
 settingsFrame:addLabel():setPosition(2, 3):setText("Hostname: " .. config.data.hostname)
-settingsFrame:addLabel():setPosition(2, 4):setText("Scan Interval: " .. config.data.scanInterval .. " seconds")
+local scanIntervals = { 5, 10, 15, 30, 60, 120 }
+local scanIntervalBtn = settingsFrame:addButton()
+    :setPosition(2, 4)
+    :setSize(28, 1)
+    :setText(string.format("Scan Interval: %ds (Click)", config.data.scanInterval or 15))
+    :setBackground(colors.blue)
+    :setForeground(colors.white)
+
+scanIntervalBtn:onClick(function()
+    local current = config.data.scanInterval or 15
+    local nextVal = 15
+    for i, v in ipairs(scanIntervals) do
+        if v == current then
+            nextVal = scanIntervals[(i % #scanIntervals) + 1]
+            break
+        end
+    end
+    config.data.scanInterval = nextVal
+    config.save()
+    scanIntervalBtn:setText(string.format("Scan Interval: %ds (Click)", nextVal))
+    db.addLog(string.format("Changed scan interval to %ds", nextVal), "info")
+end)
 
 local autoDepositBtn = settingsFrame:addButton()
     :setPosition(2, 6)
-    :setSize(24, 1)
+    :setSize(28, 1)
     :setText("Auto Deposit: " .. (config.data.autoDeposit and "ENABLED" or "DISABLED"))
     :setBackground(config.data.autoDeposit and colors.green or colors.red)
+    :setForeground(colors.white)
 
 autoDepositBtn:onClick(function()
     config.data.autoDeposit = not config.data.autoDeposit
@@ -1927,6 +2033,43 @@ local qtyInput = mainFrame:addInput()
     :setForeground(colors.black)
 qtyInput.text = "64"
 
+local qtyHighlighted = false
+
+local function setQtyHighlight(highlight)
+    qtyHighlighted = highlight
+    if highlight then
+        qtyInput:setBackground(colors.lightBlue):setForeground(colors.black)
+    else
+        qtyInput:setBackground(colors.white):setForeground(colors.black)
+    end
+end
+
+qtyInput:onClick(function(self)
+    if qtyHighlighted then
+        self.text = ""
+        if self.setValue then pcall(self.setValue, self, "") end
+        if self.setText then pcall(self.setText, self, "") end
+        setQtyHighlight(false)
+    else
+        setQtyHighlight(true)
+    end
+end)
+
+qtyInput:onChange(function(self, text)
+    if qtyHighlighted then
+        qtyHighlighted = false
+        setQtyHighlight(false)
+        local clean = text or ""
+        local newChar = clean:sub(-1)
+        if not newChar:match("%d") then
+            newChar = clean:match("%d") or ""
+        end
+        self.text = newChar
+        if self.setValue then pcall(self.setValue, self, newChar) end
+        if self.setText then pcall(self.setText, self, newChar) end
+    end
+end)
+
 local pullAllBtn = mainFrame:addButton()
     :setPosition(11, 13)
     :setSize(5, 1)
@@ -2018,7 +2161,40 @@ end
 
 local filteredItems = {}
 
+local function updateListItemAt(idx, itemName)
+    if not idx or not itemName then return end
+    local isSel = selectedItems[itemName]
+    local prefix = isSel and "[x]" or "[ ]"
+    local itObj = nil
+    for _, it in ipairs(currentItems) do
+        if it.name == itemName then
+            itObj = it
+            break
+        end
+    end
+    local dispName = itObj and itObj.displayName or itemName
+    if #dispName > 12 then
+        dispName = dispName:sub(1, 10) .. ".."
+    end
+    local total = itObj and itObj.total or 0
+    local entryText = string.format("%s %-12s %5d", prefix, dispName, total)
+    if itemList.editItem then
+        pcall(itemList.editItem, itemList, idx, entryText)
+    elseif itemList.getItem then
+        local ok, itemData = pcall(itemList.getItem, itemList, idx)
+        if ok and type(itemData) == "table" then
+            itemData.text = entryText
+        end
+    end
+end
+
 local function populateList()
+    local prevOffset = nil
+    if itemList.getOffset then
+        local ok, off = pcall(itemList.getOffset, itemList)
+        if ok and type(off) == "number" then prevOffset = off end
+    end
+
     itemList:clear()
     filteredItems = {}
     local filter = (searchInput.text or searchInput.value or ""):lower()
@@ -2037,6 +2213,11 @@ local function populateList()
             table.insert(filteredItems, item.name)
         end
     end
+
+    if prevOffset and itemList.setOffset then
+        pcall(itemList.setOffset, itemList, prevOffset)
+    end
+
     updateWithdrawButtonText()
 end
 
@@ -2083,15 +2264,15 @@ local function resolveSelectedItemName(self, item, index)
     end
 
     if idx and filteredItems[idx] then
-        return filteredItems[idx]
+        return filteredItems[idx], idx
     end
 
     local itemObj = item or (self and self.getItem and idx and pcall(self.getItem, self, idx) and self:getItem(idx)) or (self and self.getValue and pcall(self.getValue, self) and self:getValue())
     local strText = nil
     if type(itemObj) == "table" then
-        if itemObj.value then return itemObj.value end
-        if itemObj.name then return itemObj.name end
-        if itemObj.args and itemObj.args[1] then return itemObj.args[1] end
+        if itemObj.value then return itemObj.value, idx end
+        if itemObj.name then return itemObj.name, idx end
+        if itemObj.args and itemObj.args[1] then return itemObj.args[1], idx end
         strText = itemObj.text
     elseif type(itemObj) == "string" then
         strText = itemObj
@@ -2102,24 +2283,30 @@ local function resolveSelectedItemName(self, item, index)
         cleanName = cleanName:gsub("^%s*(.-)%s*$", "%1")
         for _, it in ipairs(currentItems) do
             if it.displayName == cleanName or it.name == cleanName or cleanName:find(it.displayName, 1, true) then
-                return it.name
+                return it.name, idx
             end
         end
     end
 
-    return nil
+    return nil, nil
 end
 
 local function handleSelection(self, item, index)
     if isUpdatingList then return end
-    local itemName = resolveSelectedItemName(self, item, index)
+    setQtyHighlight(false)
+    local itemName, idx = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
-        isUpdatingList = true
-        basalt.schedule(function()
-            populateList()
-            isUpdatingList = false
-        end, 0)
+        if idx and itemList.editItem then
+            updateListItemAt(idx, itemName)
+            updateWithdrawButtonText()
+        else
+            isUpdatingList = true
+            basalt.schedule(function()
+                populateList()
+                isUpdatingList = false
+            end, 0)
+        end
     end
 end
 

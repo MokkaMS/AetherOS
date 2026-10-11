@@ -6,7 +6,7 @@ local CONFIG_FILE = "/storage_config.json"
 config.data = {
     protocol = "AETHER_VAULT_NET",
     hostname = "aether_vault_server",
-    scanInterval = 5, -- seconds between automatic inventory scans
+    scanInterval = 15, -- seconds between automatic inventory scans
     autoDeposit = true, -- automatically import items placed in IO chests during scan
     ioChests = {}, -- format: { [peripheralName] = { label = "Main IO", x = 0, y = 64, z = 0, role = "both" } }
     ignoredPeripherals = {}, -- peripheral names to ignore (e.g., drives, turtle inventories, non-storage)

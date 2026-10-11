@@ -53,9 +53,15 @@ local function isValidInventory(name)
     return isInv
 end
 
+local lastPeripheralCount = 0
+
 -- Find all connected inventory peripherals on wired modem network
-function db.discoverPeripherals()
+function db.discoverPeripherals(force)
     local names = peripheral.getNames()
+    if not force and #db.storageChests > 0 and #names == lastPeripheralCount then
+        return db.storageChests, db.ioChests
+    end
+    lastPeripheralCount = #names
     local storage = {}
     local io = {}
 
