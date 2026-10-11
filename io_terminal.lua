@@ -440,7 +440,16 @@ local addModal = mainFrame:addFrame()
     :setSize(modalW, modalH)
     :setBackground(colors.gray)
     :setZ(100)
-addModal:hide()
+
+local function setModalVisible(visible)
+    if addModal.setVisible then
+        pcall(addModal.setVisible, addModal, visible)
+    end
+    addModal.visible = visible
+end
+addModal.show = function() setModalVisible(true) end
+addModal.hide = function() setModalVisible(false) end
+setModalVisible(false)
 
 local modalTitle = addModal:addLabel()
     :setPosition(2, 1)
@@ -545,7 +554,7 @@ addBtn:onClick(function()
     if modalQtyInput.setValue then pcall(modalQtyInput.setValue, modalQtyInput, "64") end
     modalQtyInput:setBackground(colors.white)
     qtyHighlighted = false
-    addModal:show()
+    setModalVisible(true)
     basalt.schedule(function()
         refreshStock()
         populateModalList("")
@@ -553,7 +562,7 @@ addBtn:onClick(function()
 end)
 
 modalCancelBtn:onClick(function()
-    addModal:hide()
+    setModalVisible(false)
 end)
 
 modalAddBtn:onClick(function()
@@ -571,7 +580,7 @@ modalAddBtn:onClick(function()
         count = qty
     })
     saveQuickOrders()
-    addModal:hide()
+    setModalVisible(false)
     renderQuickOrderGrid()
     statusLabel.text = string.format("Added quick-order: +%d %s", qty, selectedModalItem.displayName)
 end)
