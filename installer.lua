@@ -53,7 +53,12 @@ config.data = {
     ignoredPeripherals = {}, -- peripheral names to ignore (e.g., drives, turtle inventories, non-storage)
 }
 
-function config.load()
+local isLoaded = false
+
+function config.load(force)
+    if isLoaded and not force then
+        return config.data
+    end
     if fs.exists(CONFIG_FILE) then
         local file = fs.open(CONFIG_FILE, "r")
         if file then
@@ -69,6 +74,7 @@ function config.load()
     else
         config.save()
     end
+    isLoaded = true
     return config.data
 end
 
@@ -77,6 +83,7 @@ function config.save()
     if file then
         file.write(textutils.serializeJSON(config.data))
         file.close()
+        isLoaded = true
         return true
     end
     return false
@@ -195,6 +202,8 @@ function db.addLog(text, logType)
     end
 end
 
+local typeCache = {}
+
 -- Check if peripheral is an inventory and not ignored
 local function isValidInventory(name)
     if config.data.ignoredPeripherals[name] then
@@ -204,7 +213,12 @@ local function isValidInventory(name)
     if name:find("computer") or name:find("turtle") or name:find("drive") then
         return false
     end
-    return peripheral.hasType(name, "inventory")
+    if typeCache[name] ~= nil then
+        return typeCache[name]
+    end
+    local isInv = peripheral.hasType(name, "inventory")
+    typeCache[name] = isInv
+    return isInv
 end
 
 -- Find all connected inventory peripherals on wired modem network
@@ -228,16 +242,23 @@ function db.discoverPeripherals()
     return storage, io
 end
 
+local nameCache = {}
+
 -- Format technical ID to readable display name (e.g. minecraft:iron_ingot -> Iron Ingot)
 local function formatDisplayName(technicalName, itemDetail)
     if itemDetail and itemDetail.displayName then
         return itemDetail.displayName
     end
+    if nameCache[technicalName] then
+        return nameCache[technicalName]
+    end
     local id = technicalName:match("[^:]+:(.+)") or technicalName
     id = id:gsub("_", " ")
-    return id:gsub("(%a)([%w_']*)", function(first, rest)
+    local formatted = id:gsub("(%a)([%w_']*)", function(first, rest)
         return first:upper() .. rest:lower()
     end)
+    nameCache[technicalName] = formatted
+    return formatted
 end
 
 -- Complete scan of all storage chests and item indexing
@@ -252,7 +273,7 @@ function db.scanStorage()
 
     for i, chestName in ipairs(db.storageChests) do
         -- Yield periodically during large chest scans to prevent UI freezing
-        if i % 20 == 0 and coroutine.running() then
+        if i % 10 == 0 and coroutine.running() then
             os.sleep(0)
         end
 
@@ -393,21 +414,47 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     end
 
     -- Move items from storage locations to IO chest
+    local activeLocations = {}
     for _, loc in ipairs(itemData.locations) do
-        if amountMoved >= amountNeeded then break end
-        
-        local p = peripheral.wrap(loc.chest)
-        if p and p.pushItems then
-            local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
-            local ok, moved = pcall(p.pushItems, targetIOChest, loc.slot, toTransfer)
-            if ok and moved then
-                amountMoved = amountMoved + moved
+        if amountMoved < amountNeeded and loc.count > 0 then
+            local p = peripheral.wrap(loc.chest)
+            if p and p.pushItems then
+                local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
+                local ok, moved = pcall(p.pushItems, targetIOChest, loc.slot, toTransfer)
+                if ok and moved and moved > 0 then
+                    amountMoved = amountMoved + moved
+                    loc.count = loc.count - moved
+                end
             end
+        end
+        if loc.count > 0 then
+            table.insert(activeLocations, loc)
         end
     end
 
-    -- Re-scan after transfer if not skipped
-    if not skipRescan then
+    -- Incrementally update database in memory
+    itemData.locations = activeLocations
+    itemData.total = math.max(0, itemData.total - amountMoved)
+
+    -- Update db.itemIndex in memory
+    for idx = #db.itemIndex, 1, -1 do
+        local entry = db.itemIndex[idx]
+        if entry.name == itemName then
+            if itemData.total <= 0 then
+                table.remove(db.itemIndex, idx)
+            else
+                entry.total = itemData.total
+            end
+            break
+        end
+    end
+
+    if itemData.total <= 0 then
+        db.items[itemName] = nil
+    end
+
+    -- Re-scan after transfer only if explicitly requested (default: skip blocking scan)
+    if skipRescan == false then
         db.scanStorage()
     end
 
@@ -435,12 +482,12 @@ function db.withdrawMulti(requests, targetIOChest)
         end
     end
 
-    db.scanStorage()
+    -- In-memory state is already updated incrementally per item! No blocking full scan needed.
     return totalMoved, nil
 end
 
 -- Deposit items from an IO chest into storage chests
-function db.deposit(sourceIOChest)
+function db.deposit(sourceIOChest, skipRescan)
     if not sourceIOChest or not peripheral.isPresent(sourceIOChest) then
         return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
     end
@@ -490,6 +537,8 @@ function db.deposit(sourceIOChest)
                     if moved > 0 then
                         remaining = remaining - moved
                         totalDeposited = totalDeposited + moved
+                        loc.count = loc.count + moved
+                        existingData.total = existingData.total + moved
                     end
                 end
             end
@@ -515,6 +564,9 @@ function db.deposit(sourceIOChest)
                     if moved > 0 then
                         remaining = remaining - moved
                         totalDeposited = totalDeposited + moved
+                        if db.items[item.name] then
+                            db.items[item.name].total = db.items[item.name].total + moved
+                        end
                     end
                 end
             end
@@ -522,7 +574,9 @@ function db.deposit(sourceIOChest)
     end
 
     if totalDeposited > 0 then
-        db.scanStorage()
+        if not skipRescan then
+            db.scanStorage()
+        end
         db.addLog(string.format("Deposited %d items from %s into storage", totalDeposited, sourceIOChest), "deposit")
     end
 
@@ -545,9 +599,12 @@ function db.depositAllIO()
 
     for chestName, _ in pairs(allIO) do
         if peripheral.isPresent(chestName) then
-            local count, _ = db.deposit(chestName)
+            local count, _ = db.deposit(chestName, true)
             grandTotal = grandTotal + count
         end
+    end
+    if grandTotal > 0 then
+        db.scanStorage()
     end
     return grandTotal
 end
@@ -1423,14 +1480,18 @@ withdrawBtn:onClick(function()
         return
     end
 
-    local moved, err = db.withdrawMulti(requests, nearestIO)
-    if err then
-        db.addLog("Withdraw error: " .. err, "error")
-    else
-        db.addLog(string.format("Multi-withdraw complete: moved %d total items.", moved), "info")
-        selectedItems = {}
-        populateItemList(searchInput.text or searchInput.value or "")
-    end
+    withdrawBtn:setText("Moving..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        local moved, err = db.withdrawMulti(requests, nearestIO)
+        withdrawBtn:setText("Withdraw"):setBackground(colors.blue)
+        if err then
+            db.addLog("Withdraw error: " .. err, "error")
+        else
+            db.addLog(string.format("Multi-withdraw complete: moved %d total items.", moved), "info")
+            selectedItems = {}
+            populateItemList(searchInput.text or searchInput.value or "")
+        end
+    end)
 end)
 
 ---------------------------------------------------------
@@ -1494,11 +1555,15 @@ local function populateIOList()
 end
 
 ioDepositBtn:onClick(function()
-    db.addLog("Executing manual deposit from all IO chests...", "info")
-    local moved, _ = db.depositAllIO()
-    db.addLog(string.format("Manual IO Deposit complete: imported %d items.", moved), "info")
-    populateIOList()
-    populateItemList(searchInput.text or searchInput.value or "")
+    db.addLog("Executing manual deposit from all IO chests in background...", "info")
+    ioDepositBtn:setText("Depositing..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        local moved, _ = db.depositAllIO()
+        db.addLog(string.format("Manual IO Deposit complete: imported %d items.", moved), "info")
+        ioDepositBtn:setText("Deposit All IO Chests"):setBackground(colors.green)
+        populateIOList()
+        populateItemList(searchInput.text or searchInput.value or "")
+    end)
 end)
 
 ---------------------------------------------------------
@@ -1630,7 +1695,7 @@ basalt.schedule(function()
                 if not targetIO then
                     response = { success = false, message = "No IO chest available on network!" }
                 else
-                    local moved, err = db.withdraw(itemName, count, targetIO)
+                    local moved, err = db.withdraw(itemName, count, targetIO, true)
                     if err then
                         response = { success = false, message = err }
                     else
@@ -1676,7 +1741,7 @@ basalt.schedule(function()
                 if not sourceIO then
                     response = { success = false, message = "No IO chest available for deposit!" }
                 else
-                    local moved, err = db.deposit(sourceIO)
+                    local moved, err = db.deposit(sourceIO, true)
                     if err then
                         response = { success = false, message = err }
                     else
@@ -1954,7 +2019,7 @@ local function fetchItems()
     
     if not serverId then
         statusLabel.text = " Searching for server..."
-        local sId, errStr = net.findServer(2)
+        local sId, errStr = net.findServer(4)
         if not sId then
             statusLabel.text = " Error: Server offline"
             return
@@ -1963,7 +2028,7 @@ local function fetchItems()
     end
 
     statusLabel.text = " Fetching catalog..."
-    local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 2.5)
+    local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 5)
     if ok and res.success and res.items then
         currentItems = res.items
         table.sort(currentItems, function(a, b)
@@ -2097,14 +2162,15 @@ withdrawBtn:onClick(function()
         gpsPos = playerPos
     }
 
-    local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 4)
+    local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 8)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
         statusLabel.text = string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr)
         selectedItems = {}
         fetchItems()
     else
-        statusLabel.text = " Error: " .. (res and res.message or "Timeout")
+        local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
+        statusLabel.text = " Error: " .. errMsg
     end
 end)
 
@@ -2119,13 +2185,14 @@ depositBtn:onClick(function()
         gpsPos = playerPos
     }
 
-    local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 3)
+    local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 8)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
         statusLabel.text = string.format(" Deposited x%d from %s%s", res.count or 0, res.chestLabel or "IO", distStr)
         fetchItems()
     else
-        statusLabel.text = " Error: " .. (res and res.message or "Timeout")
+        local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
+        statusLabel.text = " Error: " .. errMsg
     end
 end)
 

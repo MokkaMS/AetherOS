@@ -21,6 +21,8 @@ function db.addLog(text, logType)
     end
 end
 
+local typeCache = {}
+
 -- Check if peripheral is an inventory and not ignored
 local function isValidInventory(name)
     if config.data.ignoredPeripherals[name] then
@@ -30,7 +32,12 @@ local function isValidInventory(name)
     if name:find("computer") or name:find("turtle") or name:find("drive") then
         return false
     end
-    return peripheral.hasType(name, "inventory")
+    if typeCache[name] ~= nil then
+        return typeCache[name]
+    end
+    local isInv = peripheral.hasType(name, "inventory")
+    typeCache[name] = isInv
+    return isInv
 end
 
 -- Find all connected inventory peripherals on wired modem network
@@ -54,16 +61,23 @@ function db.discoverPeripherals()
     return storage, io
 end
 
+local nameCache = {}
+
 -- Format technical ID to readable display name (e.g. minecraft:iron_ingot -> Iron Ingot)
 local function formatDisplayName(technicalName, itemDetail)
     if itemDetail and itemDetail.displayName then
         return itemDetail.displayName
     end
+    if nameCache[technicalName] then
+        return nameCache[technicalName]
+    end
     local id = technicalName:match("[^:]+:(.+)") or technicalName
     id = id:gsub("_", " ")
-    return id:gsub("(%a)([%w_']*)", function(first, rest)
+    local formatted = id:gsub("(%a)([%w_']*)", function(first, rest)
         return first:upper() .. rest:lower()
     end)
+    nameCache[technicalName] = formatted
+    return formatted
 end
 
 -- Complete scan of all storage chests and item indexing
@@ -78,7 +92,7 @@ function db.scanStorage()
 
     for i, chestName in ipairs(db.storageChests) do
         -- Yield periodically during large chest scans to prevent UI freezing
-        if i % 20 == 0 and coroutine.running() then
+        if i % 10 == 0 and coroutine.running() then
             os.sleep(0)
         end
 
@@ -219,21 +233,47 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     end
 
     -- Move items from storage locations to IO chest
+    local activeLocations = {}
     for _, loc in ipairs(itemData.locations) do
-        if amountMoved >= amountNeeded then break end
-        
-        local p = peripheral.wrap(loc.chest)
-        if p and p.pushItems then
-            local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
-            local ok, moved = pcall(p.pushItems, targetIOChest, loc.slot, toTransfer)
-            if ok and moved then
-                amountMoved = amountMoved + moved
+        if amountMoved < amountNeeded and loc.count > 0 then
+            local p = peripheral.wrap(loc.chest)
+            if p and p.pushItems then
+                local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
+                local ok, moved = pcall(p.pushItems, targetIOChest, loc.slot, toTransfer)
+                if ok and moved and moved > 0 then
+                    amountMoved = amountMoved + moved
+                    loc.count = loc.count - moved
+                end
             end
+        end
+        if loc.count > 0 then
+            table.insert(activeLocations, loc)
         end
     end
 
-    -- Re-scan after transfer if not skipped
-    if not skipRescan then
+    -- Incrementally update database in memory
+    itemData.locations = activeLocations
+    itemData.total = math.max(0, itemData.total - amountMoved)
+
+    -- Update db.itemIndex in memory
+    for idx = #db.itemIndex, 1, -1 do
+        local entry = db.itemIndex[idx]
+        if entry.name == itemName then
+            if itemData.total <= 0 then
+                table.remove(db.itemIndex, idx)
+            else
+                entry.total = itemData.total
+            end
+            break
+        end
+    end
+
+    if itemData.total <= 0 then
+        db.items[itemName] = nil
+    end
+
+    -- Re-scan after transfer only if explicitly requested (default: skip blocking scan)
+    if skipRescan == false then
         db.scanStorage()
     end
 
@@ -261,12 +301,12 @@ function db.withdrawMulti(requests, targetIOChest)
         end
     end
 
-    db.scanStorage()
+    -- In-memory state is already updated incrementally per item! No blocking full scan needed.
     return totalMoved, nil
 end
 
 -- Deposit items from an IO chest into storage chests
-function db.deposit(sourceIOChest)
+function db.deposit(sourceIOChest, skipRescan)
     if not sourceIOChest or not peripheral.isPresent(sourceIOChest) then
         return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
     end
@@ -316,6 +356,8 @@ function db.deposit(sourceIOChest)
                     if moved > 0 then
                         remaining = remaining - moved
                         totalDeposited = totalDeposited + moved
+                        loc.count = loc.count + moved
+                        existingData.total = existingData.total + moved
                     end
                 end
             end
@@ -341,6 +383,9 @@ function db.deposit(sourceIOChest)
                     if moved > 0 then
                         remaining = remaining - moved
                         totalDeposited = totalDeposited + moved
+                        if db.items[item.name] then
+                            db.items[item.name].total = db.items[item.name].total + moved
+                        end
                     end
                 end
             end
@@ -348,7 +393,9 @@ function db.deposit(sourceIOChest)
     end
 
     if totalDeposited > 0 then
-        db.scanStorage()
+        if not skipRescan then
+            db.scanStorage()
+        end
         db.addLog(string.format("Deposited %d items from %s into storage", totalDeposited, sourceIOChest), "deposit")
     end
 
@@ -371,9 +418,12 @@ function db.depositAllIO()
 
     for chestName, _ in pairs(allIO) do
         if peripheral.isPresent(chestName) then
-            local count, _ = db.deposit(chestName)
+            local count, _ = db.deposit(chestName, true)
             grandTotal = grandTotal + count
         end
+    end
+    if grandTotal > 0 then
+        db.scanStorage()
     end
     return grandTotal
 end

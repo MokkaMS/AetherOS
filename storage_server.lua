@@ -373,14 +373,18 @@ withdrawBtn:onClick(function()
         return
     end
 
-    local moved, err = db.withdrawMulti(requests, nearestIO)
-    if err then
-        db.addLog("Withdraw error: " .. err, "error")
-    else
-        db.addLog(string.format("Multi-withdraw complete: moved %d total items.", moved), "info")
-        selectedItems = {}
-        populateItemList(searchInput.text or searchInput.value or "")
-    end
+    withdrawBtn:setText("Moving..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        local moved, err = db.withdrawMulti(requests, nearestIO)
+        withdrawBtn:setText("Withdraw"):setBackground(colors.blue)
+        if err then
+            db.addLog("Withdraw error: " .. err, "error")
+        else
+            db.addLog(string.format("Multi-withdraw complete: moved %d total items.", moved), "info")
+            selectedItems = {}
+            populateItemList(searchInput.text or searchInput.value or "")
+        end
+    end)
 end)
 
 ---------------------------------------------------------
@@ -444,11 +448,15 @@ local function populateIOList()
 end
 
 ioDepositBtn:onClick(function()
-    db.addLog("Executing manual deposit from all IO chests...", "info")
-    local moved, _ = db.depositAllIO()
-    db.addLog(string.format("Manual IO Deposit complete: imported %d items.", moved), "info")
-    populateIOList()
-    populateItemList(searchInput.text or searchInput.value or "")
+    db.addLog("Executing manual deposit from all IO chests in background...", "info")
+    ioDepositBtn:setText("Depositing..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        local moved, _ = db.depositAllIO()
+        db.addLog(string.format("Manual IO Deposit complete: imported %d items.", moved), "info")
+        ioDepositBtn:setText("Deposit All IO Chests"):setBackground(colors.green)
+        populateIOList()
+        populateItemList(searchInput.text or searchInput.value or "")
+    end)
 end)
 
 ---------------------------------------------------------
@@ -580,7 +588,7 @@ basalt.schedule(function()
                 if not targetIO then
                     response = { success = false, message = "No IO chest available on network!" }
                 else
-                    local moved, err = db.withdraw(itemName, count, targetIO)
+                    local moved, err = db.withdraw(itemName, count, targetIO, true)
                     if err then
                         response = { success = false, message = err }
                     else
@@ -626,7 +634,7 @@ basalt.schedule(function()
                 if not sourceIO then
                     response = { success = false, message = "No IO chest available for deposit!" }
                 else
-                    local moved, err = db.deposit(sourceIO)
+                    local moved, err = db.deposit(sourceIO, true)
                     if err then
                         response = { success = false, message = err }
                     else

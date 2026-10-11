@@ -12,7 +12,12 @@ config.data = {
     ignoredPeripherals = {}, -- peripheral names to ignore (e.g., drives, turtle inventories, non-storage)
 }
 
-function config.load()
+local isLoaded = false
+
+function config.load(force)
+    if isLoaded and not force then
+        return config.data
+    end
     if fs.exists(CONFIG_FILE) then
         local file = fs.open(CONFIG_FILE, "r")
         if file then
@@ -28,6 +33,7 @@ function config.load()
     else
         config.save()
     end
+    isLoaded = true
     return config.data
 end
 
@@ -36,6 +42,7 @@ function config.save()
     if file then
         file.write(textutils.serializeJSON(config.data))
         file.close()
+        isLoaded = true
         return true
     end
     return false

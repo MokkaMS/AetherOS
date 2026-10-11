@@ -194,7 +194,7 @@ local function fetchItems()
     
     if not serverId then
         statusLabel.text = " Searching for server..."
-        local sId, errStr = net.findServer(2)
+        local sId, errStr = net.findServer(4)
         if not sId then
             statusLabel.text = " Error: Server offline"
             return
@@ -203,7 +203,7 @@ local function fetchItems()
     end
 
     statusLabel.text = " Fetching catalog..."
-    local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 2.5)
+    local ok, res = net.sendRequest(serverId, "GET_ITEMS", {}, 5)
     if ok and res.success and res.items then
         currentItems = res.items
         table.sort(currentItems, function(a, b)
@@ -337,14 +337,15 @@ withdrawBtn:onClick(function()
         gpsPos = playerPos
     }
 
-    local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 4)
+    local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 8)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
         statusLabel.text = string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr)
         selectedItems = {}
         fetchItems()
     else
-        statusLabel.text = " Error: " .. (res and res.message or "Timeout")
+        local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
+        statusLabel.text = " Error: " .. errMsg
     end
 end)
 
@@ -359,13 +360,14 @@ depositBtn:onClick(function()
         gpsPos = playerPos
     }
 
-    local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 3)
+    local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 8)
     if ok and res.success then
         local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
         statusLabel.text = string.format(" Deposited x%d from %s%s", res.count or 0, res.chestLabel or "IO", distStr)
         fetchItems()
     else
-        statusLabel.text = " Error: " .. (res and res.message or "Timeout")
+        local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
+        statusLabel.text = " Error: " .. errMsg
     end
 end)
 
