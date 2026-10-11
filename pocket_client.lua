@@ -51,6 +51,30 @@ local searchInput = mainFrame:addInput()
     :setForeground(colors.black)
 searchInput.placeholder = " Search..."
 
+local searchHighlighted = false
+
+local function setSearchHighlight(highlight)
+    searchHighlighted = highlight
+    if highlight then
+        searchInput:setBackground(colors.lightBlue):setForeground(colors.black)
+    else
+        searchInput:setBackground(colors.white):setForeground(colors.black)
+    end
+end
+
+searchInput:onClick(function(self)
+    if setQtyHighlight then setQtyHighlight(false) end
+    if searchHighlighted then
+        self.text = ""
+        if self.setValue then pcall(self.setValue, self, "") end
+        if self.setText then pcall(self.setText, self, "") end
+        setSearchHighlight(false)
+        populateList()
+    else
+        setSearchHighlight(true)
+    end
+end)
+
 local autoBtn = mainFrame:addButton()
     :setPosition(19, 3)
     :setSize(8, 1)
@@ -88,6 +112,7 @@ local function setQtyHighlight(highlight)
 end
 
 qtyInput:onClick(function(self)
+    setSearchHighlight(false)
     if qtyHighlighted then
         self.text = ""
         if self.setValue then pcall(self.setValue, self, "") end
@@ -337,6 +362,7 @@ end
 local function handleSelection(self, item, index)
     if isUpdatingList then return end
     setQtyHighlight(false)
+    setSearchHighlight(false)
     local itemName, idx = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
@@ -357,12 +383,27 @@ if itemList.onSelect then itemList:onSelect(handleSelection) end
 if itemList.onChange then itemList:onChange(handleSelection) end
 
 searchInput:onChange(function(self, text)
+    if searchHighlighted then
+        searchHighlighted = false
+        setSearchHighlight(false)
+        local clean = text or ""
+        local newChar = clean:sub(-1)
+        if newChar == "" then newChar = clean:sub(1, 1) or "" end
+        self.text = newChar
+        if self.setValue then pcall(self.setValue, self, newChar) end
+        if self.setText then pcall(self.setText, self, newChar) end
+        populateList()
+        return
+    end
     populateList()
 end)
 
 autoBtn:onClick(function()
+    setSearchHighlight(false)
     if currentAutoMatch then
         searchInput.text = currentAutoMatch.displayName
+        if searchInput.setValue then pcall(searchInput.setValue, searchInput, currentAutoMatch.displayName) end
+        if searchInput.setText then pcall(searchInput.setText, searchInput, currentAutoMatch.displayName) end
         populateList()
     end
 end)

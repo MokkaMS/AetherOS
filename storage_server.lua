@@ -80,7 +80,7 @@ local tabIOBtn = mainFrame:addButton()
 local tabLogsBtn = mainFrame:addButton()
     :setPosition(27, 4)
     :setSize(12, 1)
-    :setText("Activity Logs")
+    :setText("Logs")
     :setBackground(colors.cyan)
     :setForeground(colors.black)
 
@@ -107,7 +107,33 @@ local itemsFrame = contentFrame:addFrame()
 local searchInput = itemsFrame:addInput()
     :setPosition(1, 1)
     :setSize(termW - 25, 1)
+    :setBackground(colors.white)
+    :setForeground(colors.black)
 searchInput.placeholder = "Search items..."
+
+local searchHighlighted = false
+
+local function setSearchHighlight(highlight)
+    searchHighlighted = highlight
+    if highlight then
+        searchInput:setBackground(colors.lightBlue):setForeground(colors.black)
+    else
+        searchInput:setBackground(colors.white):setForeground(colors.black)
+    end
+end
+
+searchInput:onClick(function(self)
+    if setWithdrawQtyHighlight then setWithdrawQtyHighlight(false) end
+    if searchHighlighted then
+        self.text = ""
+        if self.setValue then pcall(self.setValue, self, "") end
+        if self.setText then pcall(self.setText, self, "") end
+        setSearchHighlight(false)
+        populateItemList("")
+    else
+        setSearchHighlight(true)
+    end
+end)
 
 local autoCompleteBtn = itemsFrame:addButton()
     :setPosition(termW - 24, 1)
@@ -172,6 +198,7 @@ local function setWithdrawQtyHighlight(highlight)
 end
 
 withdrawQtyInput:onClick(function(self)
+    setSearchHighlight(false)
     if withdrawQtyHighlighted then
         self.text = ""
         if self.setValue then pcall(self.setValue, self, "") end
@@ -364,6 +391,7 @@ end
 local function handleSelection(self, item, index)
     if isUpdatingList then return end
     setWithdrawQtyHighlight(false)
+    setSearchHighlight(false)
     local itemName, idx = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
@@ -384,12 +412,27 @@ if itemList.onSelect then itemList:onSelect(handleSelection) end
 if itemList.onChange then itemList:onChange(handleSelection) end
 
 searchInput:onChange(function(self, text)
+    if searchHighlighted then
+        searchHighlighted = false
+        setSearchHighlight(false)
+        local clean = text or ""
+        local newChar = clean:sub(-1)
+        if newChar == "" then newChar = clean:sub(1, 1) or "" end
+        self.text = newChar
+        if self.setValue then pcall(self.setValue, self, newChar) end
+        if self.setText then pcall(self.setText, self, newChar) end
+        populateItemList(newChar)
+        return
+    end
     populateItemList(text or searchInput.text or searchInput.value or "")
 end)
 
 autoCompleteBtn:onClick(function()
+    setSearchHighlight(false)
     if currentAutoMatch then
         searchInput.text = currentAutoMatch.displayName
+        if searchInput.setValue then pcall(searchInput.setValue, searchInput, currentAutoMatch.displayName) end
+        if searchInput.setText then pcall(searchInput.setText, searchInput, currentAutoMatch.displayName) end
         populateItemList(currentAutoMatch.displayName)
     end
 end)
@@ -527,7 +570,7 @@ ioDepositBtn:onClick(function()
 end)
 
 ---------------------------------------------------------
--- TAB 3: ACTIVITY LOGS
+-- TAB 3: LOGS
 ---------------------------------------------------------
 local logsFrame = contentFrame:addFrame()
     :setPosition(1, 1)
