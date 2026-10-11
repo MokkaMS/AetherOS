@@ -773,7 +773,14 @@ basalt.schedule(function()
                 local count = payload.count or 64
                 local gpsPos = payload.gpsPos
 
-                local targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
+                local targetIO, dist, info = nil, nil, nil
+                if payload.targetChest and config.isPeripheralPresent(payload.targetChest) then
+                    local _, actualName = config.isPeripheralPresent(payload.targetChest)
+                    targetIO = actualName or payload.targetChest
+                    info = config.getIOChestInfo(targetIO)
+                else
+                    targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
+                end
                 
                 if not targetIO then
                     response = { success = false, message = "No IO chest available on network!" }
@@ -797,7 +804,14 @@ basalt.schedule(function()
                 local requests = payload.requests or {}
                 local gpsPos = payload.gpsPos
 
-                local targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
+                local targetIO, dist, info = nil, nil, nil
+                if payload.targetChest and config.isPeripheralPresent(payload.targetChest) then
+                    local _, actualName = config.isPeripheralPresent(payload.targetChest)
+                    targetIO = actualName or payload.targetChest
+                    info = config.getIOChestInfo(targetIO)
+                else
+                    targetIO, dist, info = db.findNearestIOChest(gpsPos, "output")
+                end
                 
                 if not targetIO then
                     response = { success = false, message = "No IO chest available on network!" }
@@ -819,7 +833,15 @@ basalt.schedule(function()
 
             elseif cmd == "DEPOSIT_ITEMS" then
                 local gpsPos = payload.gpsPos
-                local sourceIO, dist, info = db.findNearestIOChest(gpsPos, "input")
+
+                local sourceIO, dist, info = nil, nil, nil
+                if payload.sourceChest and config.isPeripheralPresent(payload.sourceChest) then
+                    local _, actualName = config.isPeripheralPresent(payload.sourceChest)
+                    sourceIO = actualName or payload.sourceChest
+                    info = config.getIOChestInfo(sourceIO)
+                else
+                    sourceIO, dist, info = db.findNearestIOChest(gpsPos, "input")
+                end
 
                 if not sourceIO then
                     response = { success = false, message = "No IO chest available for deposit!" }
