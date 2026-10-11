@@ -22,6 +22,19 @@ function db.addLog(text, logType)
 end
 
 local typeCache = {}
+db.wrappedChests = {}
+
+function db.getPeripheral(name)
+    if not name then return nil end
+    local p = db.wrappedChests[name]
+    if not p then
+        if peripheral.isPresent(name) then
+            p = peripheral.wrap(name)
+            db.wrappedChests[name] = p
+        end
+    end
+    return p
+end
 
 -- Check if peripheral is an inventory and not ignored
 local function isValidInventory(name)
@@ -89,32 +102,36 @@ function db.scanStorage()
 
     local newItems = {}
     local totalItemCount = 0
+    local lastYield = os.clock()
 
-    for i, chestName in ipairs(db.storageChests) do
-        -- Yield periodically during large chest scans to prevent UI freezing
-        if i % 10 == 0 and coroutine.running() then
+    for _, chestName in ipairs(db.storageChests) do
+        -- Only yield if execution time exceeds 0.4s to prevent lag without artificial delays
+        if (os.clock() - lastYield) > 0.4 and coroutine.running() then
             os.sleep(0)
+            lastYield = os.clock()
         end
 
-        local p = peripheral.wrap(chestName)
+        local p = db.getPeripheral(chestName)
         if p and p.list then
             local ok, list = pcall(p.list)
             if ok and list then
                 for slot, item in pairs(list) do
                     if item and item.name and item.count > 0 then
                         local key = item.name
-                        if not newItems[key] then
-                            newItems[key] = {
-                                name = item.name,
-                                displayName = formatDisplayName(item.name, nil),
+                        local entry = newItems[key]
+                        if not entry then
+                            entry = {
+                                name = key,
+                                displayName = formatDisplayName(key, nil),
                                 total = 0,
                                 maxCount = 64,
                                 locations = {}
                             }
+                            newItems[key] = entry
                         end
 
-                        newItems[key].total = newItems[key].total + item.count
-                        table.insert(newItems[key].locations, {
+                        entry.total = entry.total + item.count
+                        table.insert(entry.locations, {
                             chest = chestName,
                             slot = slot,
                             count = item.count
@@ -122,6 +139,8 @@ function db.scanStorage()
                         totalItemCount = totalItemCount + item.count
                     end
                 end
+            else
+                db.wrappedChests[chestName] = nil
             end
         end
     end
@@ -168,20 +187,22 @@ function db.findNearestIOChest(playerPos, requiredRole)
 
     -- Filter connected & registered IO chests
     for pName, info in pairs(ioConfig) do
-        if peripheral.isPresent(pName) then
+        local isPresent, actualName = config.isPeripheralPresent(pName)
+        if isPresent then
             if info.role == "both" or info.role == requiredRole or requiredRole == "both" then
                 table.insert(candidates, {
-                    name = pName,
+                    name = actualName or pName,
                     info = info
                 })
             end
         end
     end
 
-    -- Fallback: If no registered IO chest matches, check any connected IO chest or storage chest fallback
+    -- Fallback: If no registered IO chest matches, check any connected IO chest
     if #candidates == 0 then
         if #db.ioChests > 0 then
-            return db.ioChests[1], nil -- Return first available IO chest without distance
+            local isPresent, actualName = config.isPeripheralPresent(db.ioChests[1])
+            return actualName or db.ioChests[1], nil
         end
         return nil, "No connected IO chest found!"
     end
@@ -215,9 +236,11 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
         return 0, "Invalid item request arguments"
     end
 
-    if not targetIOChest or not peripheral.isPresent(targetIOChest) then
+    local isPresent, actualTarget = config.isPeripheralPresent(targetIOChest)
+    if not isPresent then
         return 0, "Target IO chest '" .. tostring(targetIOChest) .. "' not present on network"
     end
+    targetIOChest = actualTarget or targetIOChest
 
     local itemData = db.items[itemName]
     if not itemData or itemData.total <= 0 then
@@ -227,7 +250,7 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     local amountNeeded = math.min(count, itemData.total)
     local amountMoved = 0
 
-    local targetP = peripheral.wrap(targetIOChest)
+    local targetP = db.getPeripheral(targetIOChest)
     if not targetP then
         return 0, "Failed to connect to IO chest peripheral"
     end
@@ -236,7 +259,7 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     local activeLocations = {}
     for _, loc in ipairs(itemData.locations) do
         if amountMoved < amountNeeded and loc.count > 0 then
-            local p = peripheral.wrap(loc.chest)
+            local p = db.getPeripheral(loc.chest)
             if p and p.pushItems then
                 local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
                 local ok, moved = pcall(p.pushItems, targetIOChest, loc.slot, toTransfer)
@@ -286,9 +309,11 @@ function db.withdrawMulti(requests, targetIOChest)
     if not requests or #requests == 0 then
         return 0, "No items selected for withdrawal"
     end
-    if not targetIOChest or not peripheral.isPresent(targetIOChest) then
+    local isPresent, actualTarget = config.isPeripheralPresent(targetIOChest)
+    if not isPresent then
         return 0, "Target IO chest not available"
     end
+    targetIOChest = actualTarget or targetIOChest
 
     local totalMoved = 0
     for _, req in ipairs(requests) do
@@ -301,22 +326,25 @@ function db.withdrawMulti(requests, targetIOChest)
         end
     end
 
-    -- In-memory state is already updated incrementally per item! No blocking full scan needed.
     return totalMoved, nil
 end
 
 -- Deposit items from an IO chest into storage chests
 function db.deposit(sourceIOChest, skipRescan)
-    if not sourceIOChest or not peripheral.isPresent(sourceIOChest) then
+    if not sourceIOChest then
+        return 0, "Source IO chest not specified"
+    end
+    local isPresent, actualSource = config.isPeripheralPresent(sourceIOChest)
+    if not isPresent then
         return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
     end
+    sourceIOChest = actualSource or sourceIOChest
 
-    -- Ensure storage peripherals are discovered if not yet loaded
     if #db.storageChests == 0 then
         db.discoverPeripherals()
     end
 
-    local sourceP = peripheral.wrap(sourceIOChest)
+    local sourceP = db.getPeripheral(sourceIOChest)
     if not sourceP or not sourceP.list then
         return 0, "Cannot access source IO chest"
     end
@@ -327,64 +355,65 @@ function db.deposit(sourceIOChest, skipRescan)
     end
 
     local totalDeposited = 0
+    local fullChests = {}
 
     for slot, item in pairs(sourceList) do
         if item and item.name and item.count > 0 then
             local remaining = item.count
+            local triedChests = {}
 
-            -- Step 1: Try stacking into existing storage chests containing the same item
+            -- Phase 1: Try chests that already contain this item (grouping items together)
             local existingData = db.items[item.name]
             if existingData and existingData.locations then
                 for _, loc in ipairs(existingData.locations) do
                     if remaining <= 0 then break end
-                    
-                    -- Try push from source IO chest first
-                    local moved = 0
-                    if sourceP and sourceP.pushItems then
-                        local pok, res = pcall(sourceP.pushItems, loc.chest, slot, remaining, loc.slot)
-                        if pok and res and res > 0 then moved = res end
-                    end
-                    -- Fallback to pull from destination storage chest
-                    if moved == 0 then
-                        local destP = peripheral.wrap(loc.chest)
-                        if destP and destP.pullItems then
-                            local pok, res = pcall(destP.pullItems, sourceIOChest, slot, remaining, loc.slot)
-                            if pok and res and res > 0 then moved = res end
+                    local targetChest = loc.chest
+                    if not fullChests[targetChest] and not triedChests[targetChest] then
+                        triedChests[targetChest] = true
+                        local pok, moved = pcall(sourceP.pushItems, targetChest, slot, remaining)
+                        if pok and moved and moved > 0 then
+                            remaining = remaining - moved
+                            totalDeposited = totalDeposited + moved
+                            existingData.total = existingData.total + moved
                         end
-                    end
-
-                    if moved > 0 then
-                        remaining = remaining - moved
-                        totalDeposited = totalDeposited + moved
-                        loc.count = loc.count + moved
-                        existingData.total = existingData.total + moved
+                        if not pok or not moved or moved < remaining then
+                            fullChests[targetChest] = true
+                        end
                     end
                 end
             end
 
-            -- Step 2: Put remaining items into any available storage chest slot
+            -- Phase 2: Put remaining items into any available storage chest
             if remaining > 0 then
                 for _, chestName in ipairs(db.storageChests) do
                     if remaining <= 0 then break end
-                    
-                    local moved = 0
-                    if sourceP and sourceP.pushItems then
-                        local pok, res = pcall(sourceP.pushItems, chestName, slot, remaining)
-                        if pok and res and res > 0 then moved = res end
-                    end
-                    if moved == 0 then
-                        local destP = peripheral.wrap(chestName)
-                        if destP and destP.pullItems then
-                            local pok, res = pcall(destP.pullItems, sourceIOChest, slot, remaining)
-                            if pok and res and res > 0 then moved = res end
+                    if not fullChests[chestName] and not triedChests[chestName] then
+                        triedChests[chestName] = true
+                        local pok, moved = pcall(sourceP.pushItems, chestName, slot, remaining)
+                        if pok and moved and moved > 0 then
+                            remaining = remaining - moved
+                            totalDeposited = totalDeposited + moved
+                            if db.items[item.name] then
+                                db.items[item.name].total = db.items[item.name].total + moved
+                            else
+                                local disp = formatDisplayName(item.name)
+                                db.items[item.name] = {
+                                    name = item.name,
+                                    displayName = disp,
+                                    total = moved,
+                                    maxCount = 64,
+                                    locations = {}
+                                }
+                                table.insert(db.itemIndex, {
+                                    name = item.name,
+                                    displayName = disp,
+                                    total = moved,
+                                    maxCount = 64
+                                })
+                            end
                         end
-                    end
-
-                    if moved > 0 then
-                        remaining = remaining - moved
-                        totalDeposited = totalDeposited + moved
-                        if db.items[item.name] then
-                            db.items[item.name].total = db.items[item.name].total + moved
+                        if not pok or not moved or moved < remaining then
+                            fullChests[chestName] = true
                         end
                     end
                 end
@@ -405,20 +434,23 @@ end
 -- Deposit from all registered/discovered IO chests
 function db.depositAllIO()
     local grandTotal = 0
-    -- Collect IO chests from both config and auto-discovered
     local allIO = {}
-    for _, name in ipairs(db.ioChests) do
-        allIO[name] = true
-    end
     for name, info in pairs(config.getIOChests()) do
         if info.role == "input" or info.role == "both" then
             allIO[name] = true
         end
     end
+    for _, name in ipairs(db.ioChests) do
+        local isPresent, actualName = config.isPeripheralPresent(name)
+        if isPresent and not config.isIOChest(name) then
+            allIO[actualName or name] = true
+        end
+    end
 
     for chestName, _ in pairs(allIO) do
-        if peripheral.isPresent(chestName) then
-            local count, _ = db.deposit(chestName, true)
+        local isPresent, actualName = config.isPeripheralPresent(chestName)
+        if isPresent then
+            local count, _ = db.deposit(actualName or chestName, true)
             grandTotal = grandTotal + count
         end
     end

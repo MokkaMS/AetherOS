@@ -326,53 +326,75 @@ withdrawBtn:onClick(function()
         return
     end
 
-    if not serverId then
-        fetchItems()
-        if not serverId then return end
-    end
+    withdrawBtn:setText("Withdrawing..."):setBackground(colors.yellow)
+    statusLabel.text = " Sending request..."
 
-    statusLabel.text = " Withdrawing selection..."
-    local payload = {
-        requests = requests,
-        gpsPos = playerPos
-    }
+    basalt.schedule(function()
+        if not serverId then
+            fetchItems()
+            if not serverId then
+                updateWithdrawButtonText()
+                withdrawBtn:setBackground(colors.orange)
+                return
+            end
+        end
 
-    local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 8)
-    if ok and res.success then
-        local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
-        statusLabel.text = string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr)
-        selectedItems = {}
-        fetchItems()
-    else
-        local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
-        statusLabel.text = " Error: " .. errMsg
-    end
+        local payload = {
+            requests = requests,
+            gpsPos = playerPos
+        }
+
+        local ok, res = net.sendRequest(serverId, "WITHDRAW_MULTI", payload, 8)
+        updateWithdrawButtonText()
+        withdrawBtn:setBackground(colors.orange)
+        if ok and res.success then
+            local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
+            statusLabel.text = string.format(" Moved x%d to %s%s", res.moved or 0, res.chestLabel or "IO", distStr)
+            selectedItems = {}
+            fetchItems()
+        else
+            local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
+            statusLabel.text = " Error: " .. errMsg
+        end
+    end)
 end)
 
 depositBtn:onClick(function()
-    if not serverId then
-        fetchItems()
-        if not serverId then return end
-    end
-
+    depositBtn:setText("Depositing..."):setBackground(colors.yellow)
     statusLabel.text = " Requesting deposit..."
-    local payload = {
-        gpsPos = playerPos
-    }
 
-    local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 8)
-    if ok and res.success then
-        local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
-        statusLabel.text = string.format(" Deposited x%d from %s%s", res.count or 0, res.chestLabel or "IO", distStr)
-        fetchItems()
-    else
-        local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
-        statusLabel.text = " Error: " .. errMsg
-    end
+    basalt.schedule(function()
+        if not serverId then
+            fetchItems()
+            if not serverId then
+                depositBtn:setText("Deposit Here (Nearest IO)"):setBackground(colors.green)
+                return
+            end
+        end
+
+        local payload = {
+            gpsPos = playerPos
+        }
+
+        local ok, res = net.sendRequest(serverId, "DEPOSIT_ITEMS", payload, 8)
+        depositBtn:setText("Deposit Here (Nearest IO)"):setBackground(colors.green)
+        if ok and res.success then
+            local distStr = res.distance and string.format(" (%.1fm)", res.distance) or ""
+            statusLabel.text = string.format(" Deposited x%d from %s%s", res.count or 0, res.chestLabel or "IO", distStr)
+            fetchItems()
+        else
+            local errMsg = (type(res) == "table" and res.message) or (type(res) == "string" and res) or "Timeout"
+            statusLabel.text = " Error: " .. errMsg
+        end
+    end)
 end)
 
 refreshBtn:onClick(function()
-    fetchItems()
+    refreshBtn:setText("Refreshing..."):setBackground(colors.yellow)
+    basalt.schedule(function()
+        fetchItems()
+        refreshBtn:setText("Refresh Server & GPS"):setBackground(colors.gray)
+    end)
 end)
 
 fetchItems()

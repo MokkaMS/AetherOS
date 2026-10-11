@@ -398,53 +398,42 @@ ioFrame.visible = false
 local ioList = ioFrame:addList()
     :setPosition(1, 1)
     :setSize(termW, math.max(1, contentH - 3))
-    :setBackground(colors.white)
+    :setBackground(colors.black)
+    :setForeground(colors.white)
+
+local ioCountLabel = ioFrame:addLabel()
+    :setPosition(1, math.max(1, contentH - 2))
+    :setForeground(colors.yellow)
 
 local ioDepositBtn = ioFrame:addButton()
     :setPosition(1, math.max(1, contentH - 1))
     :setSize(24, 1)
     :setText("Deposit All IO Chests")
     :setBackground(colors.green)
+    :setForeground(colors.white)
 
 local function populateIOList()
     ioList:clear()
     local registered = config.getIOChests()
-    local allPeripherals = peripheral.getNames()
-    local seen = {}
+    local count = 0
 
-    -- First list all registered IO chests
     for pName, data in pairs(registered) do
+        count = count + 1
         local isPresent, actualPName = config.isPeripheralPresent(pName)
-        seen[pName] = true
-        local stripped = pName:match("[^:]+:(.+)") or pName
-        seen[stripped] = true
-        if actualPName then
-            seen[actualPName] = true
-            local actualStripped = actualPName:match("[^:]+:(.+)") or actualPName
-            seen[actualStripped] = true
-        end
-
         local status = isPresent and "[ONLINE]" or "[OFFLINE]"
         local label = data.label or pName
         if #label > 14 then label = label:sub(1, 12) .. ".." end
-        local text = string.format("%-9s IO: %-14s [%d,%d,%d] Role:%s", status, label, data.x or 0, data.y or 0, data.z or 0, data.role or "both")
+        local role = (data.role or "both"):upper()
+        local text = string.format("%-9s %-14s [%d,%d,%d] Role:%s", status, label, data.x or 0, data.y or 0, data.z or 0, role)
         ioList:addItem(text)
     end
 
-    -- Also list all remaining connected storage inventories on network
-    for _, name in ipairs(allPeripherals) do
-        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") and not name:find("drive") then
-            local stripped = name:match("[^:]+:(.+)") or name
-            if not seen[name] and not seen[stripped] and not config.isIOChest(name) then
-                seen[name] = true
-                seen[stripped] = true
-                local label = name
-                if #label > 16 then label = label:sub(1, 14) .. ".." end
-                local text = string.format("[ONLINE]  STORAGE: %-16s (Connected)", label)
-                ioList:addItem(text)
-            end
-        end
+    if count == 0 then
+        ioList:addItem("[!] No IO chests registered yet.")
+        ioList:addItem("Run 'io_config_tool' on a computer to add an IO chest.")
     end
+
+    ioCountLabel.text = string.format(" Registered IO: %d | Storage Chests: %d", count, #db.storageChests)
 end
 
 ioDepositBtn:onClick(function()
@@ -700,12 +689,17 @@ end)
 basalt.schedule(function()
     while true do
         sleep(config.data.scanInterval or 5)
+        local moved = 0
         if config.data.autoDeposit then
-            db.depositAllIO()
-        else
+            moved = db.depositAllIO()
+        end
+        if moved == 0 then
             db.scanStorage()
         end
         updateStatsDisplay()
+        if moved > 0 then
+            populateItemList(searchInput.text or searchInput.value or "")
+        end
     end
 end)
 
