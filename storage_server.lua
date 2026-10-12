@@ -909,10 +909,12 @@ basalt.schedule(function()
             elseif cmd == "REGISTER_IO_CHEST" then
                 local pName = payload.peripheralName
                 local label = payload.label or pName
-                local x = payload.x or 0
-                local y = payload.y or 0
-                local z = payload.z or 0
+                local x = payload.x
+                local y = payload.y
+                local z = payload.z
                 local role = payload.role or "both"
+                local quickOrders = payload.quickOrders
+                local clearCoords = payload.clearCoords
 
                 if not pName then
                     response = { success = false, message = "Missing peripheralName parameter" }
@@ -932,13 +934,42 @@ basalt.schedule(function()
                                 message = "Chest '" .. tostring(pName) .. "' was not found as an active inventory on the network. Attach a Wired Modem, right-click it, and connect networking cable!"
                             }
                         else
-                            config.setIOChest(targetName, label, x, y, z, role)
+                            config.setIOChest(targetName, label, x, y, z, role, quickOrders, clearCoords)
                             db.discoverPeripherals()
-                            db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", targetName, label, x, y, z), "info")
-                            response = { success = true, message = "Registered " .. targetName .. " on server!" }
+                            local savedInfo = config.getIOChestInfo(targetName)
+                            local savedX = savedInfo and savedInfo.x or 0
+                            local savedY = savedInfo and savedInfo.y or 0
+                            local savedZ = savedInfo and savedInfo.z or 0
+                            db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", targetName, label, savedX, savedY, savedZ), "info")
+                            response = {
+                                success = true,
+                                message = "Registered " .. targetName .. " on server!",
+                                chest = savedInfo
+                            }
                             populateIOList()
                             updateStatsDisplay()
                         end
+                    end
+                end
+
+            elseif cmd == "UPDATE_IO_ORDERS" then
+                local pName = payload.peripheralName
+                local orders = payload.quickOrders
+                if not pName then
+                    response = { success = false, message = "Missing peripheralName parameter" }
+                else
+                    local isPresent, actualName = config.isPeripheralPresent(pName)
+                    local targetName = actualName or pName
+                    if config.setIOChestOrders(targetName, orders) then
+                        db.addLog(string.format("Updated quick orders for %s", targetName), "info")
+                        response = { success = true, message = "Saved quick orders on server!" }
+                    else
+                        config.setIOChest(targetName, targetName, nil, nil, nil, "both", orders)
+                        db.discoverPeripherals()
+                        db.addLog(string.format("Registered IO chest %s with quick orders", targetName), "info")
+                        response = { success = true, message = "Registered chest and saved orders!" }
+                        populateIOList()
+                        updateStatsDisplay()
                     end
                 end
 

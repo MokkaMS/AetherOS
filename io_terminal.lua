@@ -29,8 +29,13 @@ local QUICK_ORDERS_FILE = "/quickorders.json"
 local stationConfig = {
     chest = nil,
     label = "I/O Chest",
+    x = 0,
+    y = 0,
+    z = 0,
     monitor = nil,
-    textScale = 0.5
+    textScale = 0.5,
+    quickOrders = nil,
+    hasCustomOrders = false
 }
 
 local function loadStationConfig()
@@ -46,16 +51,6 @@ local function loadStationConfig()
     end
 end
 
-local function saveStationConfig()
-    local file = fs.open(STATION_CONFIG_FILE, "w")
-    if file then
-        file.write(textutils.serializeJSON(stationConfig))
-        file.close()
-    end
-end
-
-loadStationConfig()
-
 -- Quick orders
 local quickOrders = {}
 local DEFAULT_ORDERS = {
@@ -67,23 +62,18 @@ local DEFAULT_ORDERS = {
     { item = "minecraft:bread", displayName = "Bread", count = 16 }
 }
 
-local function loadQuickOrders()
-    if fs.exists(QUICK_ORDERS_FILE) then
-        local file = fs.open(QUICK_ORDERS_FILE, "r")
-        if file then
-            local data = textutils.unserializeJSON(file.readAll())
-            file.close()
-            if type(data) == "table" and #data > 0 then
-                quickOrders = data
-                return
-            end
-        end
+local function saveStationConfig()
+    stationConfig.quickOrders = quickOrders
+    local file = fs.open(STATION_CONFIG_FILE, "w")
+    if file then
+        file.write(textutils.serializeJSON(stationConfig))
+        file.close()
     end
-    quickOrders = DEFAULT_ORDERS
-    saveStationConfig()
 end
 
 local function saveQuickOrders()
+    stationConfig.quickOrders = quickOrders
+    saveStationConfig()
     local file = fs.open(QUICK_ORDERS_FILE, "w")
     if file then
         file.write(textutils.serializeJSON(quickOrders))
@@ -91,6 +81,43 @@ local function saveQuickOrders()
     end
 end
 
+local function loadQuickOrders()
+    -- 1. Check if stationConfig has saved quickOrders
+    if type(stationConfig.quickOrders) == "table" and (stationConfig.hasCustomOrders or #stationConfig.quickOrders > 0) then
+        quickOrders = stationConfig.quickOrders
+        return
+    end
+
+    -- 2. Check legacy / separate QUICK_ORDERS_FILE
+    if fs.exists(QUICK_ORDERS_FILE) then
+        local file = fs.open(QUICK_ORDERS_FILE, "r")
+        if file then
+            local content = file.readAll()
+            file.close()
+            local data = textutils.unserializeJSON(content)
+            if type(data) == "table" and (stationConfig.hasCustomOrders or #data > 0) then
+                quickOrders = data
+                stationConfig.quickOrders = quickOrders
+                saveStationConfig()
+                return
+            end
+        end
+    end
+
+    -- 3. Default orders for first-time setup
+    quickOrders = {}
+    for _, order in ipairs(DEFAULT_ORDERS) do
+        table.insert(quickOrders, {
+            item = order.item,
+            displayName = order.displayName,
+            count = order.count
+        })
+    end
+    stationConfig.quickOrders = quickOrders
+    saveQuickOrders()
+end
+
+loadStationConfig()
 loadQuickOrders()
 
 -- Detect monitor
@@ -143,6 +170,17 @@ local serverHostname = "..."
 local storageItems = {}
 local stockMap = {}
 
+local function syncOrdersWithServer()
+    if serverId and stationConfig.chest and not SIDES_MAP[stationConfig.chest] then
+        basalt.schedule(function()
+            net.sendRequest(serverId, "UPDATE_IO_ORDERS", {
+                peripheralName = stationConfig.chest,
+                quickOrders = quickOrders
+            }, 3)
+        end)
+    end
+end
+
 local function connectServer()
     serverId = net.findServer(3)
     if serverId then
@@ -153,37 +191,114 @@ local function connectServer()
             serverHostname = "Server #" .. serverId
         end
 
+        local serverChests = {}
+        local okChests, resChests = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
+        if okChests and resChests and resChests.success and resChests.chests then
+            serverChests = resChests.chests
+        end
+
         -- If chest is not set, try to adopt a registered IO chest from the server
         if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
-            local okChests, resChests = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
-            if okChests and resChests and resChests.success and resChests.chests then
-                local validKeys = {}
-                for k, info in pairs(resChests.chests) do
-                    if not SIDES_MAP[k] then
-                        table.insert(validKeys, { name = k, label = info.label or k })
-                    end
+            local validKeys = {}
+            for k, info in pairs(serverChests) do
+                if not SIDES_MAP[k] then
+                    table.insert(validKeys, { name = k, info = info })
                 end
-                if #validKeys == 1 then
-                    stationConfig.chest = validKeys[1].name
-                    stationConfig.label = validKeys[1].label
-                    saveStationConfig()
+            end
+            if #validKeys == 1 then
+                local chosen = validKeys[1]
+                stationConfig.chest = chosen.name
+                stationConfig.label = chosen.info.label or chosen.name
+                if chosen.info.x and (chosen.info.x ~= 0 or chosen.info.y ~= 0 or chosen.info.z ~= 0) then
+                    stationConfig.x = chosen.info.x
+                    stationConfig.y = chosen.info.y
+                    stationConfig.z = chosen.info.z
                 end
+                if chosen.info.quickOrders and #chosen.info.quickOrders > 0 and not stationConfig.hasCustomOrders then
+                    quickOrders = chosen.info.quickOrders
+                    stationConfig.quickOrders = quickOrders
+                    stationConfig.hasCustomOrders = true
+                    saveQuickOrders()
+                end
+                saveStationConfig()
             end
         end
 
-        -- Register this station's chest if configured and valid
+        -- If chest is configured and valid, synchronize state with the server
         if stationConfig.chest and not SIDES_MAP[stationConfig.chest] then
-            local gx, gy, gz = nil, nil, nil
-            if gps and gps.locate then
-                gx, gy, gz = gps.locate(1)
+            local serverInfo = serverChests[stationConfig.chest]
+            if serverInfo then
+                -- Check if server has calibrated coords that local station is missing
+                local localHasCoords = (stationConfig.x and stationConfig.x ~= 0) or
+                                       (stationConfig.y and stationConfig.y ~= 0) or
+                                       (stationConfig.z and stationConfig.z ~= 0)
+                local serverHasCoords = (serverInfo.x and serverInfo.x ~= 0) or
+                                        (serverInfo.y and serverInfo.y ~= 0) or
+                                        (serverInfo.z and serverInfo.z ~= 0)
+
+                if not localHasCoords and serverHasCoords then
+                    stationConfig.x = serverInfo.x or 0
+                    stationConfig.y = serverInfo.y or 0
+                    stationConfig.z = serverInfo.z or 0
+                    saveStationConfig()
+                end
+
+                -- Adopt server label if local is generic
+                if (not stationConfig.label or stationConfig.label == "I/O Chest" or stationConfig.label == "Not Set") and serverInfo.label then
+                    stationConfig.label = serverInfo.label
+                    saveStationConfig()
+                end
+
+                -- Adopt quick orders from server if station has not customized them locally yet
+                if not stationConfig.hasCustomOrders and serverInfo.quickOrders and #serverInfo.quickOrders > 0 then
+                    quickOrders = serverInfo.quickOrders
+                    stationConfig.quickOrders = quickOrders
+                    stationConfig.hasCustomOrders = true
+                    saveQuickOrders()
+                end
             end
+
+            -- Determine coords to send to server
+            local regX = stationConfig.x or 0
+            local regY = stationConfig.y or 0
+            local regZ = stationConfig.z or 0
+
+            -- If still 0,0,0, try GPS locate as fallback
+            if regX == 0 and regY == 0 and regZ == 0 then
+                if gps and gps.locate then
+                    local gx, gy, gz = gps.locate(1)
+                    if gx and gy and gz then
+                        regX = math.floor(gx)
+                        regY = math.floor(gy)
+                        regZ = math.floor(gz)
+                        stationConfig.x = regX
+                        stationConfig.y = regY
+                        stationConfig.z = regZ
+                        saveStationConfig()
+                    end
+                end
+            end
+
+            -- If still 0,0,0 and server had coordinates, keep server coords
+            if regX == 0 and regY == 0 and regZ == 0 and serverInfo and serverInfo.x then
+                regX = serverInfo.x or 0
+                regY = serverInfo.y or 0
+                regZ = serverInfo.z or 0
+                stationConfig.x = regX
+                stationConfig.y = regY
+                stationConfig.z = regZ
+                saveStationConfig()
+            end
+
+            -- Register this station's chest with server (never zeroing out coords, syncing buttons!)
             net.sendRequest(serverId, "REGISTER_IO_CHEST", {
                 peripheralName = stationConfig.chest,
                 label = stationConfig.label or stationConfig.chest,
-                x = gx and math.floor(gx) or 0,
-                y = gy and math.floor(gy) or 0,
-                z = gz and math.floor(gz) or 0,
-                role = "both"
+                x = regX,
+                y = regY,
+                z = regZ,
+                role = "both",
+                quickOrders = quickOrders
             }, 3)
         end
         return true
@@ -250,8 +365,17 @@ local chestLabel = headerFrame:addLabel()
 
 local function updateHeaderLabels()
     local shortChest = stationConfig.label or stationConfig.chest or "None"
-    if #shortChest > 14 then shortChest = shortChest:sub(1, 12) .. ".." end
-    chestLabel.text = " Chest: " .. shortChest
+    local coordsStr = ""
+    if stationConfig.x and (stationConfig.x ~= 0 or stationConfig.y ~= 0 or stationConfig.z ~= 0) then
+        coordsStr = string.format(" [%d,%d,%d]", stationConfig.x, stationConfig.y, stationConfig.z)
+    end
+    local maxLen = math.max(10, termW - 2)
+    local fullStr = shortChest .. coordsStr
+    if #fullStr > maxLen then
+        if #shortChest > (maxLen - 3) then shortChest = shortChest:sub(1, math.max(1, maxLen - 5)) .. ".." end
+        fullStr = shortChest
+    end
+    chestLabel.text = " Chest: " .. fullStr
 end
 updateHeaderLabels()
 
@@ -412,13 +536,17 @@ local function addFromChest()
     end
 
     local addedCount = 0
+    local updatedCount = 0
     for slot, item in pairs(list) do
         if item and item.name and item.count and item.count > 0 then
             local exists = false
             for _, q in ipairs(quickOrders) do
                 if q.item == item.name then
                     exists = true
-                    q.count = item.count
+                    if q.count ~= item.count then
+                        q.count = item.count
+                        updatedCount = updatedCount + 1
+                    end
                     break
                 end
             end
@@ -434,10 +562,18 @@ local function addFromChest()
         end
     end
 
-    if addedCount > 0 then
+    if addedCount > 0 or updatedCount > 0 then
+        stationConfig.hasCustomOrders = true
         saveQuickOrders()
+        syncOrdersWithServer()
         renderQuickOrderGrid()
-        statusLabel.text = string.format(" Added %d quick-orders from chest!", addedCount)
+        if addedCount > 0 and updatedCount > 0 then
+            statusLabel.text = string.format(" Added %d, updated %d buttons!", addedCount, updatedCount)
+        elseif addedCount > 0 then
+            statusLabel.text = string.format(" Added %d quick-orders from chest!", addedCount)
+        else
+            statusLabel.text = string.format(" Updated %d button counts!", updatedCount)
+        end
     else
         statusLabel.text = " Put items in chest to add them!"
     end
@@ -544,7 +680,9 @@ renderQuickOrderGrid = function()
         qBtn:onClick(function()
             if delMode then
                 table.remove(quickOrders, idx)
+                stationConfig.hasCustomOrders = true
                 saveQuickOrders()
+                syncOrdersWithServer()
                 statusLabel.text = " Removed: " .. dispName
                 renderQuickOrderGrid()
                 return
@@ -685,7 +823,9 @@ local function renderBrowseList()
                 displayName = it.displayName,
                 count = chosenQty
             })
+            stationConfig.hasCustomOrders = true
             saveQuickOrders()
+            syncOrdersWithServer()
             setBrowseVisible(false)
             renderQuickOrderGrid()
             statusLabel.text = string.format(" Added: +%d %s", chosenQty, dName)
@@ -729,7 +869,11 @@ local function drawConsoleHeader()
     print("==============================================")
     term.setTextColor(colors.white)
     print("Monitor:      " .. (monitorName or "Attached"))
-    print("Target Chest: " .. tostring(stationConfig.chest or "None"))
+    local chestName = stationConfig.chest or "None"
+    local chestLabelStr = stationConfig.label and (" (" .. stationConfig.label .. ")") or ""
+    print("Target Chest: " .. chestName .. chestLabelStr)
+    local coordsStr = string.format("X=%d, Y=%d, Z=%d", stationConfig.x or 0, stationConfig.y or 0, stationConfig.z or 0)
+    print("Coordinates:  " .. coordsStr)
     print("Quick-Orders: " .. #quickOrders .. " buttons configured")
     print("Server:       " .. tostring(serverHostname))
     print()
@@ -738,7 +882,8 @@ local function drawConsoleHeader()
     print(" [A] Add Item by Name (Type with Keyboard)")
     print(" [D] Deposit Chest Now")
     print(" [C] Select/Change Target Chest")
-    print(" [R] Refresh Stock")
+    print(" [X] Set / Calibrate Coordinates (GPS/Manual)")
+    print(" [R] Refresh Stock & Server")
     term.setTextColor(colors.gray)
     print("==============================================")
 end
@@ -786,7 +931,9 @@ basalt.schedule(function()
                                 displayName = chosenItem.displayName,
                                 count = qty
                             })
+                            stationConfig.hasCustomOrders = true
                             saveQuickOrders()
+                            syncOrdersWithServer()
                             renderQuickOrderGrid()
                             term.setTextColor(colors.green)
                             print("\nAdded '+ " .. qty .. " " .. chosenItem.displayName .. "' to monitor!")
@@ -811,6 +958,78 @@ basalt.schedule(function()
                     print("Deposit complete!")
                     sleep(1)
                 end
+                drawConsoleHeader()
+
+            elseif key == keys.x then
+                term.clear()
+                term.setCursorPos(1, 1)
+                term.setTextColor(colors.yellow)
+                print("==============================================")
+                print("       SET / CALIBRATE I/O COORDINATES        ")
+                print("==============================================")
+                term.setTextColor(colors.white)
+                print("Current Coords: X=" .. (stationConfig.x or 0) .. ", Y=" .. (stationConfig.y or 0) .. ", Z=" .. (stationConfig.z or 0))
+                print()
+
+                local gpsX, gpsY, gpsZ = nil, nil, nil
+                if gps and gps.locate then
+                    term.setTextColor(colors.cyan)
+                    write("Scanning for GPS signal...")
+                    gpsX, gpsY, gpsZ = gps.locate(2)
+                    print()
+                end
+
+                local finalX, finalY, finalZ
+                if gpsX and gpsY and gpsZ then
+                    term.setTextColor(colors.green)
+                    print(string.format("GPS position detected: X=%d, Y=%d, Z=%d", math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)))
+                    term.setTextColor(colors.white)
+                    write("Use detected GPS coords? (Y/n): ")
+                    local useGps = (read() or ""):lower()
+                    if useGps == "" or useGps == "y" then
+                        finalX, finalY, finalZ = math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)
+                    end
+                else
+                    term.setTextColor(colors.orange)
+                    print("No GPS signal found in range.")
+                end
+
+                if not finalX then
+                    term.setTextColor(colors.white)
+                    write(string.format("Enter X coordinate [%d]: ", stationConfig.x or 0))
+                    local inX = read()
+                    finalX = (inX ~= "" and tonumber(inX)) or stationConfig.x or 0
+
+                    write(string.format("Enter Y coordinate [%d]: ", stationConfig.y or 0))
+                    local inY = read()
+                    finalY = (inY ~= "" and tonumber(inY)) or stationConfig.y or 0
+
+                    write(string.format("Enter Z coordinate [%d]: ", stationConfig.z or 0))
+                    local inZ = read()
+                    finalZ = (inZ ~= "" and tonumber(inZ)) or stationConfig.z or 0
+                end
+
+                stationConfig.x = finalX
+                stationConfig.y = finalY
+                stationConfig.z = finalZ
+                saveStationConfig()
+
+                if serverId and stationConfig.chest and not SIDES_MAP[stationConfig.chest] then
+                    net.sendRequest(serverId, "REGISTER_IO_CHEST", {
+                        peripheralName = stationConfig.chest,
+                        label = stationConfig.label or stationConfig.chest,
+                        x = finalX,
+                        y = finalY,
+                        z = finalZ,
+                        role = "both",
+                        quickOrders = quickOrders
+                    }, 3)
+                end
+
+                updateHeaderLabels()
+                term.setTextColor(colors.green)
+                print(string.format("\nCoordinates saved: [%d, %d, %d]!", finalX, finalY, finalZ))
+                sleep(1.5)
                 drawConsoleHeader()
 
             elseif key == keys.c then
@@ -841,8 +1060,9 @@ basalt.schedule(function()
                 for pName, info in pairs(serverChests) do
                     if not SIDES_MAP[pName] then
                         count = count + 1
-                        table.insert(options, { name = pName, label = info.label or pName })
-                        print(string.format(" %d) %s (%s)", count, pName, info.label or pName))
+                        table.insert(options, { name = pName, label = info.label or pName, info = info })
+                        local coordStr = string.format("[%d,%d,%d]", info.x or 0, info.y or 0, info.z or 0)
+                        print(string.format(" %d) %s (%s) %s", count, pName, info.label or pName, coordStr))
                     end
                 end
                 if count == 0 then
@@ -857,10 +1077,12 @@ basalt.schedule(function()
                 if inputStr and inputStr ~= "" then
                     local selectedName = nil
                     local selectedLabel = nil
+                    local selectedInfo = nil
                     local num = tonumber(inputStr)
                     if num and options[num] then
                         selectedName = options[num].name
                         selectedLabel = options[num].label
+                        selectedInfo = options[num].info
                     else
                         if peripheral.isPresent(inputStr) and peripheral.hasType(inputStr, "inventory") then
                             selectedName = inputStr
@@ -885,6 +1107,51 @@ basalt.schedule(function()
                         else
                             stationConfig.chest = selectedName
                             stationConfig.label = selectedLabel or selectedName
+
+                            if selectedInfo then
+                                if selectedInfo.x and (selectedInfo.x ~= 0 or selectedInfo.y ~= 0 or selectedInfo.z ~= 0) then
+                                    stationConfig.x = selectedInfo.x
+                                    stationConfig.y = selectedInfo.y
+                                    stationConfig.z = selectedInfo.z
+                                end
+                                if selectedInfo.quickOrders and #selectedInfo.quickOrders > 0 and not stationConfig.hasCustomOrders then
+                                    quickOrders = selectedInfo.quickOrders
+                                    stationConfig.quickOrders = quickOrders
+                                    stationConfig.hasCustomOrders = true
+                                    saveQuickOrders()
+                                end
+                            end
+
+                            print()
+                            write(string.format("Configure coordinates now? Current: [%d,%d,%d] (y/N): ", stationConfig.x or 0, stationConfig.y or 0, stationConfig.z or 0))
+                            local setCoords = (read() or ""):lower()
+                            if setCoords == "y" then
+                                local gx, gy, gz = nil, nil, nil
+                                if gps and gps.locate then
+                                    gx, gy, gz = gps.locate(2)
+                                end
+                                if gx and gy and gz then
+                                    write(string.format("Use detected GPS coords [%d,%d,%d]? (Y/n): ", math.floor(gx), math.floor(gy), math.floor(gz)))
+                                    local uGps = (read() or ""):lower()
+                                    if uGps == "" or uGps == "y" then
+                                        stationConfig.x = math.floor(gx)
+                                        stationConfig.y = math.floor(gy)
+                                        stationConfig.z = math.floor(gz)
+                                    end
+                                end
+                                if not gx then
+                                    write(string.format("Enter X [%d]: ", stationConfig.x or 0))
+                                    local inX = read()
+                                    if inX ~= "" and tonumber(inX) then stationConfig.x = tonumber(inX) end
+                                    write(string.format("Enter Y [%d]: ", stationConfig.y or 0))
+                                    local inY = read()
+                                    if inY ~= "" and tonumber(inY) then stationConfig.y = tonumber(inY) end
+                                    write(string.format("Enter Z [%d]: ", stationConfig.z or 0))
+                                    local inZ = read()
+                                    if inZ ~= "" and tonumber(inZ) then stationConfig.z = tonumber(inZ) end
+                                end
+                            end
+
                             saveStationConfig()
                             connectServer()
                             updateHeaderLabels()

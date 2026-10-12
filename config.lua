@@ -88,21 +88,50 @@ function config.cleanInvalidIOChests()
     end
 end
 
-function config.setIOChest(peripheralName, label, x, y, z, role)
+function config.setIOChest(peripheralName, label, x, y, z, role, quickOrders, clearCoords)
     if not peripheralName or peripheralName == "" then return end
     config.load()
     
     local present, actualName = config.isPeripheralPresent(peripheralName)
     local targetName = actualName or peripheralName
+    local existing = config.data.ioChests[targetName] or {}
+
+    local numX = tonumber(x)
+    local numY = tonumber(y)
+    local numZ = tonumber(z)
+
+    -- If incoming coordinates are 0,0,0 (or nil) and existing entry has non-zero coordinates,
+    -- preserve the existing calibrated coordinates unless explicit clearCoords is true!
+    local incomingIsZero = (numX == nil or (numX == 0 and (numY or 0) == 0 and (numZ or 0) == 0))
+    local existingHasCoords = existing.x and (existing.x ~= 0 or (existing.y or 0) ~= 0 or (existing.z or 0) ~= 0)
+    if incomingIsZero and existingHasCoords and not clearCoords then
+        numX = existing.x
+        numY = existing.y
+        numZ = existing.z
+    end
 
     config.data.ioChests[targetName] = {
-        label = label or targetName,
-        x = tonumber(x) or 0,
-        y = tonumber(y) or 0,
-        z = tonumber(z) or 0,
-        role = role or "both"
+        label = label or existing.label or targetName,
+        x = numX or 0,
+        y = numY or 0,
+        z = numZ or 0,
+        role = role or existing.role or "both",
+        quickOrders = (quickOrders ~= nil) and quickOrders or existing.quickOrders
     }
     config.save()
+end
+
+function config.setIOChestOrders(peripheralName, orders)
+    if not peripheralName or peripheralName == "" then return false end
+    config.load()
+    local present, actualName = config.isPeripheralPresent(peripheralName)
+    local targetName = actualName or peripheralName
+    if config.data.ioChests[targetName] then
+        config.data.ioChests[targetName].quickOrders = orders
+        config.save()
+        return true
+    end
+    return false
 end
 
 function config.removeIOChest(peripheralName)

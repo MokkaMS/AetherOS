@@ -89,7 +89,7 @@ local function getRemoteIOChests()
     return config.getIOChests()
 end
 
-local function registerIOChest(pName, label, x, y, z, role)
+local function registerIOChest(pName, label, x, y, z, role, quickOrders)
     if isRemote then
         local payload = {
             peripheralName = pName,
@@ -97,7 +97,8 @@ local function registerIOChest(pName, label, x, y, z, role)
             x = x,
             y = y,
             z = z,
-            role = role
+            role = role,
+            quickOrders = quickOrders
         }
         local ok, res = net.sendRequest(serverId, "REGISTER_IO_CHEST", payload, 4)
         if ok and res.success then
@@ -107,7 +108,7 @@ local function registerIOChest(pName, label, x, y, z, role)
             return false, errDetail
         end
     else
-        config.setIOChest(pName, label, x, y, z, role)
+        config.setIOChest(pName, label, x, y, z, role, quickOrders)
         return true, "Registered locally in config!"
     end
 end
@@ -273,13 +274,21 @@ local function main()
                         end
                     end
 
+                    local remoteChests = getRemoteIOChests()
+                    local existingInfo = remoteChests and remoteChests[pName]
                     if not finalX then
-                        write("Enter X coordinate: ")
-                        finalX = tonumber(read()) or 0
-                        write("Enter Y coordinate: ")
-                        finalY = tonumber(read()) or 0
-                        write("Enter Z coordinate: ")
-                        finalZ = tonumber(read()) or 0
+                        local defX = existingInfo and existingInfo.x or 0
+                        local defY = existingInfo and existingInfo.y or 0
+                        local defZ = existingInfo and existingInfo.z or 0
+                        write(string.format("Enter X coordinate [%d]: ", defX))
+                        local inX = read()
+                        finalX = (inX ~= "" and tonumber(inX)) or defX
+                        write(string.format("Enter Y coordinate [%d]: ", defY))
+                        local inY = read()
+                        finalY = (inY ~= "" and tonumber(inY)) or defY
+                        write(string.format("Enter Z coordinate [%d]: ", defZ))
+                        local inZ = read()
+                        finalZ = (inZ ~= "" and tonumber(inZ)) or defZ
                     end
 
                     local proceed = true
@@ -295,7 +304,7 @@ local function main()
                     end
 
                     if proceed then
-                        local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role)
+                        local ok, msg = registerIOChest(pName, label, finalX, finalY, finalZ, role, existingInfo and existingInfo.quickOrders)
                         if ok then
                             term.setTextColor(colors.green)
                             print()

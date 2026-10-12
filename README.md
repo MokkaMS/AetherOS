@@ -115,6 +115,24 @@ lua pocket_client.lua
 - Select an item, enter quantity, and tap **"Withdraw (Nearest IO)"**. The system automatically computes distance to all I/O chests and sends items to the nearest one!
 - Drop items into your nearest I/O chest, tap **"Deposit Here (Nearest IO)"**, and the system imports all items into main storage!
 
+### 4. Running the Dedicated I/O Station & Quick-Order Monitor
+On an Advanced Computer connected to an Advanced Monitor and I/O Chest:
+
+```bash
+lua io_terminal.lua
+```
+
+- Provides 1-tap quick withdrawal buttons on the monitor touchscreen.
+- **Deposit All**: 1-tap button to dump items directly into the storage network.
+- **Add Quick-Orders**: Drop items into the chest and tap `+Chest` or use `+Browse` / keyboard search to add buttons.
+- **Persistent Memory**: Button configuration and 3D coordinates are persistently saved locally and synchronized with the storage server, so they remain intact across computer restarts!
+- **Console Controls**:
+  - `[A]` Add item by name via keyboard
+  - `[D]` Deposit chest immediately
+  - `[C]` Select / Change target chest (adopts server settings and coordinates)
+  - `[X]` Set / Calibrate coordinates (GPS auto-detection or manual input)
+  - `[R]` Refresh stock & reconnect
+
 ---
 
 ## 📄 File Structure
@@ -124,5 +142,6 @@ lua pocket_client.lua
 - `net_protocol.lua`: Rednet message definitions & RPC communication handler.
 - `storage_server.lua`: Main server application with Basalt v2.5 desktop GUI.
 - `pocket_client.lua`: Handheld Pocket Computer client with Basalt v2.5 touch UI.
+- `io_terminal.lua`: Dedicated I/O Station terminal with monitor touchscreen quick-order buttons.
 - `io_config_tool.lua`: Interactive CLI setup tool for I/O chest registration and GPS calibration.
 - `installer.lua`: One-click installer & dependency downloader.
