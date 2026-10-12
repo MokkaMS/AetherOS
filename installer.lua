@@ -39,7 +39,7 @@ end
 -- Embedded System Files Backup
 local embeddedFiles = {}
 
-embeddedFiles["config.lua"] = [=
+embeddedFiles["config.lua"] = [=[
 -- Configuration management for CC:Tweaked Storage & ME System
 local config = {}
 
@@ -235,7 +235,7 @@ config.cleanInvalidIOChests()
 return config
 ]=]
 
-embeddedFiles["db.lua"] = [=
+embeddedFiles["db.lua"] = [=[
 -- Database and Storage Engine for CC:Tweaked ME System
 local config = require("config")
 
@@ -925,7 +925,7 @@ end
 return db
 ]=]
 
-embeddedFiles["net_protocol.lua"] = [=
+embeddedFiles["net_protocol.lua"] = [=[
 -- Network Communication Protocol for CC:Tweaked Wireless Pocket Computers & Storage Server
 local config = require("config")
 
@@ -1020,7 +1020,7 @@ end
 return net
 ]=]
 
-embeddedFiles["io_config_tool.lua"] = [=
+embeddedFiles["io_config_tool.lua"] = [=[
 -- Interactive IO Chest Configuration & GPS Calibration Tool
 -- Supports both local server execution and remote execution over Rednet
 local config = require("config")
@@ -1429,7 +1429,7 @@ end
 main()
 ]=]
 
-embeddedFiles["storage_server.lua"] = [=
+embeddedFiles["storage_server.lua"] = [=[
 -- Main Server Storage System with Basalt v2.5 GUI & Wireless Rednet Controller
 local config = require("config")
 local db = require("db")
@@ -2472,7 +2472,7 @@ else
 end
 ]=]
 
-embeddedFiles["pocket_client.lua"] = [=
+embeddedFiles["pocket_client.lua"] = [=[
 -- Pocket Computer Wireless Remote Client with Basalt v2.5 GUI
 local config = require("config")
 local net = require("net_protocol")
@@ -3006,7 +3006,7 @@ end
 ]=]
 
 
-embeddedFiles["io_terminal.lua"] = [=
+embeddedFiles["io_terminal.lua"] = [=[
 -- AetherVault OS: Dedicated I/O Station & Quick-Order Monitor Terminal
 -- Optimized for Advanced Monitors (Touchscreen friendly, compact text, paging, and 1-tap chest adding)
 local config = require("config")
