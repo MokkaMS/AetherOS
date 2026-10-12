@@ -538,25 +538,39 @@ local ioCountLabel = ioFrame:addLabel()
 
 local ioDepositBtn = ioFrame:addButton()
     :setPosition(1, math.max(1, contentH - 1))
-    :setSize(24, 1)
+    :setSize(22, 1)
     :setText("Deposit All IO Chests")
     :setBackground(colors.green)
     :setForeground(colors.white)
 
+local ioRemoveBtn = ioFrame:addButton()
+    :setPosition(24, math.max(1, contentH - 1))
+    :setSize(18, 1)
+    :setText("Remove Selected IO")
+    :setBackground(colors.red)
+    :setForeground(colors.white)
+
+local registeredIOListKeys = {}
+
 local function populateIOList()
     ioList:clear()
+    registeredIOListKeys = {}
+    config.cleanInvalidIOChests()
     local registered = config.getIOChests()
     local count = 0
 
     for pName, data in pairs(registered) do
         count = count + 1
         local isPresent, actualPName = config.isPeripheralPresent(pName)
-        local status = isPresent and "[ONLINE]" or "[OFFLINE]"
+        local targetName = actualPName or pName
+        local isInv = isPresent and peripheral.hasType(targetName, "inventory")
+        local status = isInv and "[ONLINE]" or (isPresent and "[NOT-INV]" or "[OFFLINE]")
         local label = data.label or pName
         if #label > 14 then label = label:sub(1, 12) .. ".." end
         local role = (data.role or "both"):upper()
         local text = string.format("%-9s %-14s [%d,%d,%d] Role:%s", status, label, data.x or 0, data.y or 0, data.z or 0, role)
         ioList:addItem(text)
+        table.insert(registeredIOListKeys, pName)
     end
 
     if count == 0 then
@@ -566,6 +580,31 @@ local function populateIOList()
 
     ioCountLabel.text = string.format(" Registered IO: %d | Storage Chests: %d", count, #db.storageChests)
 end
+
+ioRemoveBtn:onClick(function()
+    local idx = nil
+    if ioList.getSelectedIndex then
+        local ok, val = pcall(ioList.getSelectedIndex, ioList)
+        if ok and type(val) == "number" then idx = val end
+    end
+    if not idx and ioList.getValue then
+        local ok, val = pcall(ioList.getValue, ioList)
+        if ok and type(val) == "table" and val.text then
+            for i, k in ipairs(registeredIOListKeys) do
+                if val.text:find(k, 1, true) then idx = i break end
+            end
+        end
+    end
+
+    if idx and registeredIOListKeys[idx] then
+        local pName = registeredIOListKeys[idx]
+        config.removeIOChest(pName)
+        db.discoverPeripherals()
+        db.addLog(string.format("Removed IO Chest: %s", pName), "info")
+        populateIOList()
+        updateStatsDisplay()
+    end
+end)
 
 ioDepositBtn:onClick(function()
     db.addLog("Executing manual deposit from all IO chests in background...", "info")
@@ -875,15 +914,32 @@ basalt.schedule(function()
                 local z = payload.z or 0
                 local role = payload.role or "both"
 
-                if pName then
-                    config.setIOChest(pName, label, x, y, z, role)
-                    db.discoverPeripherals()
-                    db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", pName, label, x, y, z), "info")
-                    response = { success = true, message = "Registered " .. pName .. " on server!" }
-                    populateIOList()
-                    updateStatsDisplay()
-                else
+                if not pName then
                     response = { success = false, message = "Missing peripheralName parameter" }
+                else
+                    local sides = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+                    if sides[pName] and not (peripheral.isPresent(pName) and peripheral.hasType(pName, "inventory")) then
+                        response = {
+                            success = false,
+                            message = "Cannot register computer side '" .. tostring(pName) .. "': it is not a connected inventory on the storage server. IO chests must be connected with a Wired Modem!"
+                        }
+                    else
+                        local isPresent, actualName = config.isPeripheralPresent(pName)
+                        local targetName = actualName or pName
+                        if not isPresent or not peripheral.hasType(targetName, "inventory") then
+                            response = {
+                                success = false,
+                                message = "Chest '" .. tostring(pName) .. "' was not found as an active inventory on the network. Attach a Wired Modem, right-click it, and connect networking cable!"
+                            }
+                        else
+                            config.setIOChest(targetName, label, x, y, z, role)
+                            db.discoverPeripherals()
+                            db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", targetName, label, x, y, z), "info")
+                            response = { success = true, message = "Registered " .. targetName .. " on server!" }
+                            populateIOList()
+                            updateStatsDisplay()
+                        end
+                    end
                 end
 
             elseif cmd == "REMOVE_IO_CHEST" then

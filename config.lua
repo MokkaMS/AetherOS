@@ -63,6 +63,31 @@ function config.isPeripheralPresent(peripheralName)
     return false, nil
 end
 
+function config.isInventoryPresent(peripheralName)
+    local present, actual = config.isPeripheralPresent(peripheralName)
+    if present and actual and peripheral.hasType(actual, "inventory") then
+        return true, actual
+    end
+    return false, nil
+end
+
+-- Automatically sanitize config.data.ioChests to remove invalid side registrations
+function config.cleanInvalidIOChests()
+    if not config.data or not config.data.ioChests then return end
+    local sides = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+    local changed = false
+    for k, _ in pairs(config.data.ioChests) do
+        -- Remove if it's a computer side name that is not a server-attached inventory
+        if sides[k] and not (peripheral.isPresent(k) and peripheral.hasType(k, "inventory")) then
+            config.data.ioChests[k] = nil
+            changed = true
+        end
+    end
+    if changed then
+        config.save()
+    end
+end
+
 function config.setIOChest(peripheralName, label, x, y, z, role)
     if not peripheralName or peripheralName == "" then return end
     config.load()
@@ -134,5 +159,6 @@ end
 
 -- Initialize default config on load
 config.load()
+config.cleanInvalidIOChests()
 
 return config

@@ -461,6 +461,7 @@ withdrawBtn:onClick(function()
             end
         end
 
+        updateGPS()
         local payload = {
             requests = requests,
             gpsPos = playerPos
@@ -494,6 +495,7 @@ depositBtn:onClick(function()
             end
         end
 
+        updateGPS()
         local payload = {
             gpsPos = playerPos
         }

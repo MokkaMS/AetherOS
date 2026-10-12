@@ -105,6 +105,31 @@ function config.isPeripheralPresent(peripheralName)
     return false, nil
 end
 
+function config.isInventoryPresent(peripheralName)
+    local present, actual = config.isPeripheralPresent(peripheralName)
+    if present and actual and peripheral.hasType(actual, "inventory") then
+        return true, actual
+    end
+    return false, nil
+end
+
+-- Automatically sanitize config.data.ioChests to remove invalid side registrations
+function config.cleanInvalidIOChests()
+    if not config.data or not config.data.ioChests then return end
+    local sides = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+    local changed = false
+    for k, _ in pairs(config.data.ioChests) do
+        -- Remove if it's a computer side name that is not a server-attached inventory
+        if sides[k] and not (peripheral.isPresent(k) and peripheral.hasType(k, "inventory")) then
+            config.data.ioChests[k] = nil
+            changed = true
+        end
+    end
+    if changed then
+        config.save()
+    end
+end
+
 function config.setIOChest(peripheralName, label, x, y, z, role)
     if not peripheralName or peripheralName == "" then return end
     config.load()
@@ -176,6 +201,7 @@ end
 
 -- Initialize default config on load
 config.load()
+config.cleanInvalidIOChests()
 
 return config
 
@@ -388,15 +414,18 @@ function db.findNearestIOChest(playerPos, requiredRole)
     
     local candidates = {}
 
-    -- Filter connected & registered IO chests
+    -- Filter connected & registered IO chests that are verified INVENTORIES
     for pName, info in pairs(ioConfig) do
         local isPresent, actualName = config.isPeripheralPresent(pName)
-        if isPresent then
-            if info.role == "both" or info.role == requiredRole or requiredRole == "both" then
-                table.insert(candidates, {
-                    name = actualName or pName,
-                    info = info
-                })
+        if isPresent and actualName and peripheral.hasType(actualName, "inventory") then
+            local p = db.getPeripheral(actualName)
+            if p and p.list then
+                if info.role == "both" or info.role == requiredRole or requiredRole == "both" then
+                    table.insert(candidates, {
+                        name = actualName,
+                        info = info
+                    })
+                end
             end
         end
     end
@@ -404,10 +433,17 @@ function db.findNearestIOChest(playerPos, requiredRole)
     -- Fallback: If no registered IO chest matches, check any connected IO chest
     if #candidates == 0 then
         if #db.ioChests > 0 then
-            local isPresent, actualName = config.isPeripheralPresent(db.ioChests[1])
-            return actualName or db.ioChests[1], nil
+            for _, cName in ipairs(db.ioChests) do
+                local isPresent, actualName = config.isPeripheralPresent(cName)
+                if isPresent and actualName and peripheral.hasType(actualName, "inventory") then
+                    local p = db.getPeripheral(actualName)
+                    if p and p.list then
+                        return actualName, nil, { label = actualName, x = 0, y = 0, z = 0, role = "both" }
+                    end
+                end
+            end
         end
-        return nil, "No connected IO chest found!"
+        return nil, "No valid connected IO chest found on network!"
     end
 
     -- If player position is provided (GPS coordinates)
@@ -416,10 +452,14 @@ function db.findNearestIOChest(playerPos, requiredRole)
         local minDistance = math.huge
 
         for _, item in ipairs(candidates) do
-            local dist = calculateDistance(playerPos, item.info)
-            if dist < minDistance then
-                minDistance = dist
-                nearest = item
+            -- Only measure against chests with calibrated coordinates (not default 0,0,0 unless player is at 0,0,0)
+            local hasCoords = (item.info.x ~= 0 or item.info.y ~= 0 or item.info.z ~= 0)
+            if hasCoords then
+                local dist = calculateDistance(playerPos, item.info)
+                if dist < minDistance then
+                    minDistance = dist
+                    nearest = item
+                end
             end
         end
 
@@ -428,7 +468,15 @@ function db.findNearestIOChest(playerPos, requiredRole)
         end
     end
 
-    -- Default fallback if GPS is not available: return first candidate
+    -- Default fallback if GPS is not available or chests lack coordinates:
+    -- Prefer candidates with friendly labels or calibrated coordinates
+    table.sort(candidates, function(a, b)
+        local aHas = (a.info.x ~= 0 or a.info.y ~= 0 or a.info.z ~= 0) and 1 or 0
+        local bHas = (b.info.x ~= 0 or b.info.y ~= 0 or b.info.z ~= 0) and 1 or 0
+        if aHas ~= bHas then return aHas > bHas end
+        return tostring(a.info.label or a.name) < tostring(b.info.label or b.name)
+    end)
+
     local defaultChest = candidates[1]
     return defaultChest.name, nil, defaultChest.info
 end
@@ -440,10 +488,19 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     end
 
     local isPresent, actualTarget = config.isPeripheralPresent(targetIOChest)
-    if not isPresent then
+    if not isPresent or not actualTarget then
         return 0, "Target IO chest '" .. tostring(targetIOChest) .. "' not present on network"
     end
-    targetIOChest = actualTarget or targetIOChest
+    targetIOChest = actualTarget
+
+    if not peripheral.hasType(targetIOChest, "inventory") then
+        return 0, "Target '" .. tostring(targetIOChest) .. "' is not an inventory peripheral"
+    end
+
+    local targetP = db.getPeripheral(targetIOChest)
+    if not targetP or not targetP.list then
+        return 0, "Failed to connect to IO chest peripheral '" .. tostring(targetIOChest) .. "'"
+    end
 
     local itemData = db.items[itemName]
     if not itemData or itemData.total <= 0 then
@@ -453,15 +510,13 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     local amountNeeded = math.min(count, itemData.total)
     local amountMoved = 0
 
-    local targetP = db.getPeripheral(targetIOChest)
-    if not targetP then
-        return 0, "Failed to connect to IO chest peripheral"
-    end
-
     -- Move items from storage locations to IO chest
     local activeLocations = {}
+    local pushErrorEncountered = false
+    local lastErrorMsg = nil
+
     for _, loc in ipairs(itemData.locations) do
-        if amountMoved < amountNeeded and loc.count > 0 then
+        if amountMoved < amountNeeded and loc.count > 0 and not pushErrorEncountered then
             local p = db.getPeripheral(loc.chest)
             if p and p.pushItems then
                 local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
@@ -469,6 +524,11 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
                 if ok and moved and moved > 0 then
                     amountMoved = amountMoved + moved
                     loc.count = loc.count - moved
+                elseif not ok then
+                    -- Peripheral push call failed (e.g. unknown network peripheral or unreachable block)
+                    -- Abort immediately to prevent hanging/timing out across 560 chests!
+                    pushErrorEncountered = true
+                    lastErrorMsg = tostring(moved)
                 end
             end
         end
@@ -503,6 +563,10 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
         db.scanStorage()
     end
 
+    if pushErrorEncountered and amountMoved == 0 then
+        return 0, "Push failed to target IO chest: " .. tostring(lastErrorMsg or "peripheral unreachable")
+    end
+
     db.addLog(string.format("Withdrew %d x %s to %s", amountMoved, itemData.displayName, targetIOChest), "withdraw")
     return amountMoved, nil
 end
@@ -513,18 +577,25 @@ function db.withdrawMulti(requests, targetIOChest)
         return 0, "No items selected for withdrawal"
     end
     local isPresent, actualTarget = config.isPeripheralPresent(targetIOChest)
-    if not isPresent then
-        return 0, "Target IO chest not available"
+    if not isPresent or not actualTarget then
+        return 0, "Target IO chest '" .. tostring(targetIOChest) .. "' not present on network"
     end
-    targetIOChest = actualTarget or targetIOChest
+    targetIOChest = actualTarget
+
+    if not peripheral.hasType(targetIOChest, "inventory") then
+        return 0, "Target '" .. tostring(targetIOChest) .. "' is not an inventory peripheral"
+    end
 
     local totalMoved = 0
     for _, req in ipairs(requests) do
         if req.item then
             local qty = req.all and (db.items[req.item] and db.items[req.item].total or 0) or (req.count or 64)
             if qty > 0 then
-                local moved, _ = db.withdraw(req.item, qty, targetIOChest, true)
-                totalMoved = totalMoved + moved
+                local moved, err = db.withdraw(req.item, qty, targetIOChest, true)
+                totalMoved = totalMoved + (moved or 0)
+                if err and totalMoved == 0 then
+                    return 0, err
+                end
             end
         end
     end
@@ -547,10 +618,14 @@ function db.deposit(sourceIOChest, skipRescan)
         return 0, "Source IO chest not specified"
     end
     local isPresent, actualSource = config.isPeripheralPresent(sourceIOChest)
-    if not isPresent then
-        return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
+    if not isPresent or not actualSource then
+        return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present on network"
     end
-    sourceIOChest = actualSource or sourceIOChest
+    sourceIOChest = actualSource
+
+    if not peripheral.hasType(sourceIOChest, "inventory") then
+        return 0, "Source '" .. tostring(sourceIOChest) .. "' is not an inventory peripheral"
+    end
 
     if #db.storageChests == 0 then
         db.discoverPeripherals()
@@ -558,7 +633,7 @@ function db.deposit(sourceIOChest, skipRescan)
 
     local sourceP = db.getPeripheral(sourceIOChest)
     if not sourceP or not sourceP.list then
-        return 0, "Cannot access source IO chest"
+        return 0, "Cannot access source IO chest peripheral '" .. tostring(sourceIOChest) .. "'"
     end
 
     local ok, sourceList = pcall(sourceP.list)
@@ -1861,25 +1936,39 @@ local ioCountLabel = ioFrame:addLabel()
 
 local ioDepositBtn = ioFrame:addButton()
     :setPosition(1, math.max(1, contentH - 1))
-    :setSize(24, 1)
+    :setSize(22, 1)
     :setText("Deposit All IO Chests")
     :setBackground(colors.green)
     :setForeground(colors.white)
 
+local ioRemoveBtn = ioFrame:addButton()
+    :setPosition(24, math.max(1, contentH - 1))
+    :setSize(18, 1)
+    :setText("Remove Selected IO")
+    :setBackground(colors.red)
+    :setForeground(colors.white)
+
+local registeredIOListKeys = {}
+
 local function populateIOList()
     ioList:clear()
+    registeredIOListKeys = {}
+    config.cleanInvalidIOChests()
     local registered = config.getIOChests()
     local count = 0
 
     for pName, data in pairs(registered) do
         count = count + 1
         local isPresent, actualPName = config.isPeripheralPresent(pName)
-        local status = isPresent and "[ONLINE]" or "[OFFLINE]"
+        local targetName = actualPName or pName
+        local isInv = isPresent and peripheral.hasType(targetName, "inventory")
+        local status = isInv and "[ONLINE]" or (isPresent and "[NOT-INV]" or "[OFFLINE]")
         local label = data.label or pName
         if #label > 14 then label = label:sub(1, 12) .. ".." end
         local role = (data.role or "both"):upper()
         local text = string.format("%-9s %-14s [%d,%d,%d] Role:%s", status, label, data.x or 0, data.y or 0, data.z or 0, role)
         ioList:addItem(text)
+        table.insert(registeredIOListKeys, pName)
     end
 
     if count == 0 then
@@ -1889,6 +1978,31 @@ local function populateIOList()
 
     ioCountLabel.text = string.format(" Registered IO: %d | Storage Chests: %d", count, #db.storageChests)
 end
+
+ioRemoveBtn:onClick(function()
+    local idx = nil
+    if ioList.getSelectedIndex then
+        local ok, val = pcall(ioList.getSelectedIndex, ioList)
+        if ok and type(val) == "number" then idx = val end
+    end
+    if not idx and ioList.getValue then
+        local ok, val = pcall(ioList.getValue, ioList)
+        if ok and type(val) == "table" and val.text then
+            for i, k in ipairs(registeredIOListKeys) do
+                if val.text:find(k, 1, true) then idx = i break end
+            end
+        end
+    end
+
+    if idx and registeredIOListKeys[idx] then
+        local pName = registeredIOListKeys[idx]
+        config.removeIOChest(pName)
+        db.discoverPeripherals()
+        db.addLog(string.format("Removed IO Chest: %s", pName), "info")
+        populateIOList()
+        updateStatsDisplay()
+    end
+end)
 
 ioDepositBtn:onClick(function()
     db.addLog("Executing manual deposit from all IO chests in background...", "info")
@@ -2198,15 +2312,32 @@ basalt.schedule(function()
                 local z = payload.z or 0
                 local role = payload.role or "both"
 
-                if pName then
-                    config.setIOChest(pName, label, x, y, z, role)
-                    db.discoverPeripherals()
-                    db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", pName, label, x, y, z), "info")
-                    response = { success = true, message = "Registered " .. pName .. " on server!" }
-                    populateIOList()
-                    updateStatsDisplay()
-                else
+                if not pName then
                     response = { success = false, message = "Missing peripheralName parameter" }
+                else
+                    local sides = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+                    if sides[pName] and not (peripheral.isPresent(pName) and peripheral.hasType(pName, "inventory")) then
+                        response = {
+                            success = false,
+                            message = "Cannot register computer side '" .. tostring(pName) .. "': it is not a connected inventory on the storage server. IO chests must be connected with a Wired Modem!"
+                        }
+                    else
+                        local isPresent, actualName = config.isPeripheralPresent(pName)
+                        local targetName = actualName or pName
+                        if not isPresent or not peripheral.hasType(targetName, "inventory") then
+                            response = {
+                                success = false,
+                                message = "Chest '" .. tostring(pName) .. "' was not found as an active inventory on the network. Attach a Wired Modem, right-click it, and connect networking cable!"
+                            }
+                        else
+                            config.setIOChest(targetName, label, x, y, z, role)
+                            db.discoverPeripherals()
+                            db.addLog(string.format("Remote IO Register: %s (%s) [%d,%d,%d]", targetName, label, x, y, z), "info")
+                            response = { success = true, message = "Registered " .. targetName .. " on server!" }
+                            populateIOList()
+                            updateStatsDisplay()
+                        end
+                    end
                 end
 
             elseif cmd == "REMOVE_IO_CHEST" then
@@ -2741,6 +2872,7 @@ withdrawBtn:onClick(function()
             end
         end
 
+        updateGPS()
         local payload = {
             requests = requests,
             gpsPos = playerPos
@@ -2774,6 +2906,7 @@ depositBtn:onClick(function()
             end
         end
 
+        updateGPS()
         local payload = {
             gpsPos = playerPos
         }
@@ -2930,35 +3063,24 @@ termW = termW or 29
 termH = termH or 12
 
 -- Auto-detect adjacent or network chest
-local function detectChests()
+local SIDES_MAP = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+
+-- Clean up any legacy invalid computer side name from config file
+if stationConfig.chest and SIDES_MAP[stationConfig.chest] then
+    stationConfig.chest = nil
+    stationConfig.label = "Not Set"
+    saveStationConfig()
+end
+
+-- Detect available network inventories (excluding computers/turtles)
+local function detectNetworkInventories()
     local candidates = {}
-    local sides = { "top", "bottom", "left", "right", "front", "back" }
-    for _, s in ipairs(sides) do
-        if peripheral.isPresent(s) and peripheral.hasType(s, "inventory") then
-            table.insert(candidates, { name = s, label = s })
-        end
-    end
     for _, name in ipairs(peripheral.getNames()) do
-        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") then
-            local exists = false
-            for _, c in ipairs(candidates) do
-                if c.name == name then exists = true break end
-            end
-            if not exists then
-                table.insert(candidates, { name = name, label = name })
-            end
+        if not SIDES_MAP[name] and peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") and not name:find("drive") then
+            table.insert(candidates, { name = name, label = name })
         end
     end
     return candidates
-end
-
-if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
-    local candidates = detectChests()
-    if #candidates > 0 then
-        stationConfig.chest = candidates[1].name
-        stationConfig.label = candidates[1].label
-        saveStationConfig()
-    end
 end
 
 -- Server state
@@ -2977,10 +3099,36 @@ local function connectServer()
             serverHostname = "Server #" .. serverId
         end
 
-        if stationConfig.chest then
+        -- If chest is not set, try to adopt a registered IO chest from the server
+        if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
+            local okChests, resChests = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
+            if okChests and resChests and resChests.success and resChests.chests then
+                local validKeys = {}
+                for k, info in pairs(resChests.chests) do
+                    if not SIDES_MAP[k] then
+                        table.insert(validKeys, { name = k, label = info.label or k })
+                    end
+                end
+                if #validKeys == 1 then
+                    stationConfig.chest = validKeys[1].name
+                    stationConfig.label = validKeys[1].label
+                    saveStationConfig()
+                end
+            end
+        end
+
+        -- Register this station's chest if configured and valid
+        if stationConfig.chest and not SIDES_MAP[stationConfig.chest] then
+            local gx, gy, gz = nil, nil, nil
+            if gps and gps.locate then
+                gx, gy, gz = gps.locate(1)
+            end
             net.sendRequest(serverId, "REGISTER_IO_CHEST", {
                 peripheralName = stationConfig.chest,
                 label = stationConfig.label or stationConfig.chest,
+                x = gx and math.floor(gx) or 0,
+                y = gy and math.floor(gy) or 0,
+                z = gz and math.floor(gz) or 0,
                 role = "both"
             }, 3)
         end
@@ -3139,7 +3287,14 @@ local renderQuickOrderGrid -- forward declare
 -- =========================================================
 -- TOUCH ACTION: DEPOSIT
 -- =========================================================
+-- =========================================================
+-- TOUCH ACTION: DEPOSIT
+-- =========================================================
 depositBtn:onClick(function()
+    if not stationConfig.chest then
+        statusLabel.text = " Error: No chest set! Press [C] on computer."
+        return
+    end
     depositBtn:setText("Depositing..."):setBackground(colors.yellow)
     statusLabel.text = " Depositing items into storage..."
     basalt.schedule(function()
@@ -3164,7 +3319,7 @@ depositBtn:onClick(function()
             renderQuickOrderGrid()
         else
             local err = (type(res) == "table" and res.message) or "Timeout"
-            statusLabel.text = " Deposit error: " .. tostring(err)
+            statusLabel.text = " Deposit: " .. tostring(err)
         end
     end)
 end)
@@ -3174,12 +3329,23 @@ end)
 -- (The ultimate Minecraft touch convenience!)
 -- =========================================================
 local function addFromChest()
-    if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
-        statusLabel.text = " Error: Target chest not found!"
+    local targetChest = stationConfig.chest
+    if not targetChest or not peripheral.isPresent(targetChest) then
+        -- Also check adjacent computer sides so players can quickly drop items to create buttons!
+        for _, s in ipairs({ "top", "bottom", "left", "right", "front", "back" }) do
+            if peripheral.isPresent(s) and peripheral.hasType(s, "inventory") then
+                targetChest = s
+                break
+            end
+        end
+    end
+
+    if not targetChest then
+        statusLabel.text = " Put items in chest & tap [+Chest]!"
         return
     end
 
-    local p = peripheral.wrap(stationConfig.chest)
+    local p = peripheral.wrap(targetChest)
     if not p or not p.list then
         statusLabel.text = " Error: Cannot read chest!"
         return
@@ -3327,6 +3493,11 @@ renderQuickOrderGrid = function()
                 saveQuickOrders()
                 statusLabel.text = " Removed: " .. dispName
                 renderQuickOrderGrid()
+                return
+            end
+
+            if not stationConfig.chest then
+                statusLabel.text = " Error: No chest set! Press [C] on computer."
                 return
             end
 
@@ -3592,26 +3763,83 @@ basalt.schedule(function()
                 term.clear()
                 term.setCursorPos(1, 1)
                 term.setTextColor(colors.yellow)
-                print("--- SELECT TARGET I/O CHEST ---")
-                local cList = detectChests()
-                if #cList > 0 then
-                    for idx, c in ipairs(cList) do
-                        print(string.format(" %d) %s (%s)", idx, c.name, c.label))
+                print("==============================================")
+                print("          SELECT / CONFIGURE I/O CHEST        ")
+                print("==============================================")
+                term.setTextColor(colors.white)
+                print("An IO chest must have a Wired Modem connected")
+                print("to the AetherVault network cable.\n")
+
+                if not serverId then connectServer() end
+
+                local serverChests = {}
+                if serverId then
+                    local ok, res = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
+                    if ok and res and res.success and res.chests then
+                        serverChests = res.chests
                     end
-                    write("\nSelect (1-" .. #cList .. "): ")
-                    local choice = tonumber(read())
-                    if choice and cList[choice] then
-                        stationConfig.chest = cList[choice].name
-                        stationConfig.label = cList[choice].label
-                        saveStationConfig()
-                        updateHeaderLabels()
-                        term.setTextColor(colors.green)
-                        print("Saved target chest: " .. stationConfig.chest)
-                        sleep(1)
+                end
+
+                local options = {}
+                term.setTextColor(colors.cyan)
+                print("Registered I/O Chests on Server:")
+                local count = 0
+                for pName, info in pairs(serverChests) do
+                    if not SIDES_MAP[pName] then
+                        count = count + 1
+                        table.insert(options, { name = pName, label = info.label or pName })
+                        print(string.format(" %d) %s (%s)", count, pName, info.label or pName))
                     end
-                else
-                    print("No chest inventories detected!")
-                    sleep(1.5)
+                end
+                if count == 0 then
+                    print(" (None registered yet on server)")
+                end
+
+                print("\nOptions:")
+                print(" - Type a menu # (1-" .. math.max(1, #options) .. ")")
+                print(" - Or enter new chest peripheral name (e.g. 561 or minecraft:chest_561)")
+                write("\nChest selection: ")
+                local inputStr = read()
+                if inputStr and inputStr ~= "" then
+                    local selectedName = nil
+                    local selectedLabel = nil
+                    local num = tonumber(inputStr)
+                    if num and options[num] then
+                        selectedName = options[num].name
+                        selectedLabel = options[num].label
+                    else
+                        if peripheral.isPresent(inputStr) and peripheral.hasType(inputStr, "inventory") then
+                            selectedName = inputStr
+                        elseif peripheral.isPresent("minecraft:chest_" .. inputStr) then
+                            selectedName = "minecraft:chest_" .. inputStr
+                        elseif peripheral.isPresent("minecraft:barrel_" .. inputStr) then
+                            selectedName = "minecraft:barrel_" .. inputStr
+                        else
+                            selectedName = inputStr
+                        end
+                        write("Enter friendly label (e.g. Station Chest): ")
+                        selectedLabel = read()
+                        if not selectedLabel or selectedLabel == "" then selectedLabel = selectedName end
+                    end
+
+                    if selectedName then
+                        if SIDES_MAP[selectedName] then
+                            term.setTextColor(colors.red)
+                            print("\nCannot use computer side '" .. selectedName .. "'!")
+                            print("The chest MUST have a Wired Modem attached to connect to the network.")
+                            sleep(2.5)
+                        else
+                            stationConfig.chest = selectedName
+                            stationConfig.label = selectedLabel or selectedName
+                            saveStationConfig()
+                            connectServer()
+                            updateHeaderLabels()
+                            renderQuickOrderGrid()
+                            term.setTextColor(colors.green)
+                            print("\nSaved target chest: " .. stationConfig.chest)
+                            sleep(1.5)
+                        end
+                    end
                 end
                 drawConsoleHeader()
 

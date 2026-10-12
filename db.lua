@@ -204,15 +204,18 @@ function db.findNearestIOChest(playerPos, requiredRole)
     
     local candidates = {}
 
-    -- Filter connected & registered IO chests
+    -- Filter connected & registered IO chests that are verified INVENTORIES
     for pName, info in pairs(ioConfig) do
         local isPresent, actualName = config.isPeripheralPresent(pName)
-        if isPresent then
-            if info.role == "both" or info.role == requiredRole or requiredRole == "both" then
-                table.insert(candidates, {
-                    name = actualName or pName,
-                    info = info
-                })
+        if isPresent and actualName and peripheral.hasType(actualName, "inventory") then
+            local p = db.getPeripheral(actualName)
+            if p and p.list then
+                if info.role == "both" or info.role == requiredRole or requiredRole == "both" then
+                    table.insert(candidates, {
+                        name = actualName,
+                        info = info
+                    })
+                end
             end
         end
     end
@@ -220,10 +223,17 @@ function db.findNearestIOChest(playerPos, requiredRole)
     -- Fallback: If no registered IO chest matches, check any connected IO chest
     if #candidates == 0 then
         if #db.ioChests > 0 then
-            local isPresent, actualName = config.isPeripheralPresent(db.ioChests[1])
-            return actualName or db.ioChests[1], nil
+            for _, cName in ipairs(db.ioChests) do
+                local isPresent, actualName = config.isPeripheralPresent(cName)
+                if isPresent and actualName and peripheral.hasType(actualName, "inventory") then
+                    local p = db.getPeripheral(actualName)
+                    if p and p.list then
+                        return actualName, nil, { label = actualName, x = 0, y = 0, z = 0, role = "both" }
+                    end
+                end
+            end
         end
-        return nil, "No connected IO chest found!"
+        return nil, "No valid connected IO chest found on network!"
     end
 
     -- If player position is provided (GPS coordinates)
@@ -232,10 +242,14 @@ function db.findNearestIOChest(playerPos, requiredRole)
         local minDistance = math.huge
 
         for _, item in ipairs(candidates) do
-            local dist = calculateDistance(playerPos, item.info)
-            if dist < minDistance then
-                minDistance = dist
-                nearest = item
+            -- Only measure against chests with calibrated coordinates (not default 0,0,0 unless player is at 0,0,0)
+            local hasCoords = (item.info.x ~= 0 or item.info.y ~= 0 or item.info.z ~= 0)
+            if hasCoords then
+                local dist = calculateDistance(playerPos, item.info)
+                if dist < minDistance then
+                    minDistance = dist
+                    nearest = item
+                end
             end
         end
 
@@ -244,7 +258,15 @@ function db.findNearestIOChest(playerPos, requiredRole)
         end
     end
 
-    -- Default fallback if GPS is not available: return first candidate
+    -- Default fallback if GPS is not available or chests lack coordinates:
+    -- Prefer candidates with friendly labels or calibrated coordinates
+    table.sort(candidates, function(a, b)
+        local aHas = (a.info.x ~= 0 or a.info.y ~= 0 or a.info.z ~= 0) and 1 or 0
+        local bHas = (b.info.x ~= 0 or b.info.y ~= 0 or b.info.z ~= 0) and 1 or 0
+        if aHas ~= bHas then return aHas > bHas end
+        return tostring(a.info.label or a.name) < tostring(b.info.label or b.name)
+    end)
+
     local defaultChest = candidates[1]
     return defaultChest.name, nil, defaultChest.info
 end
@@ -256,10 +278,19 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     end
 
     local isPresent, actualTarget = config.isPeripheralPresent(targetIOChest)
-    if not isPresent then
+    if not isPresent or not actualTarget then
         return 0, "Target IO chest '" .. tostring(targetIOChest) .. "' not present on network"
     end
-    targetIOChest = actualTarget or targetIOChest
+    targetIOChest = actualTarget
+
+    if not peripheral.hasType(targetIOChest, "inventory") then
+        return 0, "Target '" .. tostring(targetIOChest) .. "' is not an inventory peripheral"
+    end
+
+    local targetP = db.getPeripheral(targetIOChest)
+    if not targetP or not targetP.list then
+        return 0, "Failed to connect to IO chest peripheral '" .. tostring(targetIOChest) .. "'"
+    end
 
     local itemData = db.items[itemName]
     if not itemData or itemData.total <= 0 then
@@ -269,15 +300,13 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
     local amountNeeded = math.min(count, itemData.total)
     local amountMoved = 0
 
-    local targetP = db.getPeripheral(targetIOChest)
-    if not targetP then
-        return 0, "Failed to connect to IO chest peripheral"
-    end
-
     -- Move items from storage locations to IO chest
     local activeLocations = {}
+    local pushErrorEncountered = false
+    local lastErrorMsg = nil
+
     for _, loc in ipairs(itemData.locations) do
-        if amountMoved < amountNeeded and loc.count > 0 then
+        if amountMoved < amountNeeded and loc.count > 0 and not pushErrorEncountered then
             local p = db.getPeripheral(loc.chest)
             if p and p.pushItems then
                 local toTransfer = math.min(amountNeeded - amountMoved, loc.count)
@@ -285,6 +314,11 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
                 if ok and moved and moved > 0 then
                     amountMoved = amountMoved + moved
                     loc.count = loc.count - moved
+                elseif not ok then
+                    -- Peripheral push call failed (e.g. unknown network peripheral or unreachable block)
+                    -- Abort immediately to prevent hanging/timing out across 560 chests!
+                    pushErrorEncountered = true
+                    lastErrorMsg = tostring(moved)
                 end
             end
         end
@@ -319,6 +353,10 @@ function db.withdraw(itemName, count, targetIOChest, skipRescan)
         db.scanStorage()
     end
 
+    if pushErrorEncountered and amountMoved == 0 then
+        return 0, "Push failed to target IO chest: " .. tostring(lastErrorMsg or "peripheral unreachable")
+    end
+
     db.addLog(string.format("Withdrew %d x %s to %s", amountMoved, itemData.displayName, targetIOChest), "withdraw")
     return amountMoved, nil
 end
@@ -329,18 +367,25 @@ function db.withdrawMulti(requests, targetIOChest)
         return 0, "No items selected for withdrawal"
     end
     local isPresent, actualTarget = config.isPeripheralPresent(targetIOChest)
-    if not isPresent then
-        return 0, "Target IO chest not available"
+    if not isPresent or not actualTarget then
+        return 0, "Target IO chest '" .. tostring(targetIOChest) .. "' not present on network"
     end
-    targetIOChest = actualTarget or targetIOChest
+    targetIOChest = actualTarget
+
+    if not peripheral.hasType(targetIOChest, "inventory") then
+        return 0, "Target '" .. tostring(targetIOChest) .. "' is not an inventory peripheral"
+    end
 
     local totalMoved = 0
     for _, req in ipairs(requests) do
         if req.item then
             local qty = req.all and (db.items[req.item] and db.items[req.item].total or 0) or (req.count or 64)
             if qty > 0 then
-                local moved, _ = db.withdraw(req.item, qty, targetIOChest, true)
-                totalMoved = totalMoved + moved
+                local moved, err = db.withdraw(req.item, qty, targetIOChest, true)
+                totalMoved = totalMoved + (moved or 0)
+                if err and totalMoved == 0 then
+                    return 0, err
+                end
             end
         end
     end
@@ -363,10 +408,14 @@ function db.deposit(sourceIOChest, skipRescan)
         return 0, "Source IO chest not specified"
     end
     local isPresent, actualSource = config.isPeripheralPresent(sourceIOChest)
-    if not isPresent then
-        return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present"
+    if not isPresent or not actualSource then
+        return 0, "Source IO chest '" .. tostring(sourceIOChest) .. "' not present on network"
     end
-    sourceIOChest = actualSource or sourceIOChest
+    sourceIOChest = actualSource
+
+    if not peripheral.hasType(sourceIOChest, "inventory") then
+        return 0, "Source '" .. tostring(sourceIOChest) .. "' is not an inventory peripheral"
+    end
 
     if #db.storageChests == 0 then
         db.discoverPeripherals()
@@ -374,7 +423,7 @@ function db.deposit(sourceIOChest, skipRescan)
 
     local sourceP = db.getPeripheral(sourceIOChest)
     if not sourceP or not sourceP.list then
-        return 0, "Cannot access source IO chest"
+        return 0, "Cannot access source IO chest peripheral '" .. tostring(sourceIOChest) .. "'"
     end
 
     local ok, sourceList = pcall(sourceP.list)

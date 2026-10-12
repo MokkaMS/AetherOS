@@ -117,35 +117,24 @@ termW = termW or 29
 termH = termH or 12
 
 -- Auto-detect adjacent or network chest
-local function detectChests()
+local SIDES_MAP = { top = true, bottom = true, left = true, right = true, front = true, back = true }
+
+-- Clean up any legacy invalid computer side name from config file
+if stationConfig.chest and SIDES_MAP[stationConfig.chest] then
+    stationConfig.chest = nil
+    stationConfig.label = "Not Set"
+    saveStationConfig()
+end
+
+-- Detect available network inventories (excluding computers/turtles)
+local function detectNetworkInventories()
     local candidates = {}
-    local sides = { "top", "bottom", "left", "right", "front", "back" }
-    for _, s in ipairs(sides) do
-        if peripheral.isPresent(s) and peripheral.hasType(s, "inventory") then
-            table.insert(candidates, { name = s, label = s })
-        end
-    end
     for _, name in ipairs(peripheral.getNames()) do
-        if peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") then
-            local exists = false
-            for _, c in ipairs(candidates) do
-                if c.name == name then exists = true break end
-            end
-            if not exists then
-                table.insert(candidates, { name = name, label = name })
-            end
+        if not SIDES_MAP[name] and peripheral.hasType(name, "inventory") and not name:find("computer") and not name:find("turtle") and not name:find("drive") then
+            table.insert(candidates, { name = name, label = name })
         end
     end
     return candidates
-end
-
-if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
-    local candidates = detectChests()
-    if #candidates > 0 then
-        stationConfig.chest = candidates[1].name
-        stationConfig.label = candidates[1].label
-        saveStationConfig()
-    end
 end
 
 -- Server state
@@ -164,10 +153,36 @@ local function connectServer()
             serverHostname = "Server #" .. serverId
         end
 
-        if stationConfig.chest then
+        -- If chest is not set, try to adopt a registered IO chest from the server
+        if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
+            local okChests, resChests = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
+            if okChests and resChests and resChests.success and resChests.chests then
+                local validKeys = {}
+                for k, info in pairs(resChests.chests) do
+                    if not SIDES_MAP[k] then
+                        table.insert(validKeys, { name = k, label = info.label or k })
+                    end
+                end
+                if #validKeys == 1 then
+                    stationConfig.chest = validKeys[1].name
+                    stationConfig.label = validKeys[1].label
+                    saveStationConfig()
+                end
+            end
+        end
+
+        -- Register this station's chest if configured and valid
+        if stationConfig.chest and not SIDES_MAP[stationConfig.chest] then
+            local gx, gy, gz = nil, nil, nil
+            if gps and gps.locate then
+                gx, gy, gz = gps.locate(1)
+            end
             net.sendRequest(serverId, "REGISTER_IO_CHEST", {
                 peripheralName = stationConfig.chest,
                 label = stationConfig.label or stationConfig.chest,
+                x = gx and math.floor(gx) or 0,
+                y = gy and math.floor(gy) or 0,
+                z = gz and math.floor(gz) or 0,
                 role = "both"
             }, 3)
         end
@@ -326,7 +341,14 @@ local renderQuickOrderGrid -- forward declare
 -- =========================================================
 -- TOUCH ACTION: DEPOSIT
 -- =========================================================
+-- =========================================================
+-- TOUCH ACTION: DEPOSIT
+-- =========================================================
 depositBtn:onClick(function()
+    if not stationConfig.chest then
+        statusLabel.text = " Error: No chest set! Press [C] on computer."
+        return
+    end
     depositBtn:setText("Depositing..."):setBackground(colors.yellow)
     statusLabel.text = " Depositing items into storage..."
     basalt.schedule(function()
@@ -351,7 +373,7 @@ depositBtn:onClick(function()
             renderQuickOrderGrid()
         else
             local err = (type(res) == "table" and res.message) or "Timeout"
-            statusLabel.text = " Deposit error: " .. tostring(err)
+            statusLabel.text = " Deposit: " .. tostring(err)
         end
     end)
 end)
@@ -361,12 +383,23 @@ end)
 -- (The ultimate Minecraft touch convenience!)
 -- =========================================================
 local function addFromChest()
-    if not stationConfig.chest or not peripheral.isPresent(stationConfig.chest) then
-        statusLabel.text = " Error: Target chest not found!"
+    local targetChest = stationConfig.chest
+    if not targetChest or not peripheral.isPresent(targetChest) then
+        -- Also check adjacent computer sides so players can quickly drop items to create buttons!
+        for _, s in ipairs({ "top", "bottom", "left", "right", "front", "back" }) do
+            if peripheral.isPresent(s) and peripheral.hasType(s, "inventory") then
+                targetChest = s
+                break
+            end
+        end
+    end
+
+    if not targetChest then
+        statusLabel.text = " Put items in chest & tap [+Chest]!"
         return
     end
 
-    local p = peripheral.wrap(stationConfig.chest)
+    local p = peripheral.wrap(targetChest)
     if not p or not p.list then
         statusLabel.text = " Error: Cannot read chest!"
         return
@@ -514,6 +547,11 @@ renderQuickOrderGrid = function()
                 saveQuickOrders()
                 statusLabel.text = " Removed: " .. dispName
                 renderQuickOrderGrid()
+                return
+            end
+
+            if not stationConfig.chest then
+                statusLabel.text = " Error: No chest set! Press [C] on computer."
                 return
             end
 
@@ -779,26 +817,83 @@ basalt.schedule(function()
                 term.clear()
                 term.setCursorPos(1, 1)
                 term.setTextColor(colors.yellow)
-                print("--- SELECT TARGET I/O CHEST ---")
-                local cList = detectChests()
-                if #cList > 0 then
-                    for idx, c in ipairs(cList) do
-                        print(string.format(" %d) %s (%s)", idx, c.name, c.label))
+                print("==============================================")
+                print("          SELECT / CONFIGURE I/O CHEST        ")
+                print("==============================================")
+                term.setTextColor(colors.white)
+                print("An IO chest must have a Wired Modem connected")
+                print("to the AetherVault network cable.\n")
+
+                if not serverId then connectServer() end
+
+                local serverChests = {}
+                if serverId then
+                    local ok, res = net.sendRequest(serverId, "GET_IO_CHESTS", {}, 3)
+                    if ok and res and res.success and res.chests then
+                        serverChests = res.chests
                     end
-                    write("\nSelect (1-" .. #cList .. "): ")
-                    local choice = tonumber(read())
-                    if choice and cList[choice] then
-                        stationConfig.chest = cList[choice].name
-                        stationConfig.label = cList[choice].label
-                        saveStationConfig()
-                        updateHeaderLabels()
-                        term.setTextColor(colors.green)
-                        print("Saved target chest: " .. stationConfig.chest)
-                        sleep(1)
+                end
+
+                local options = {}
+                term.setTextColor(colors.cyan)
+                print("Registered I/O Chests on Server:")
+                local count = 0
+                for pName, info in pairs(serverChests) do
+                    if not SIDES_MAP[pName] then
+                        count = count + 1
+                        table.insert(options, { name = pName, label = info.label or pName })
+                        print(string.format(" %d) %s (%s)", count, pName, info.label or pName))
                     end
-                else
-                    print("No chest inventories detected!")
-                    sleep(1.5)
+                end
+                if count == 0 then
+                    print(" (None registered yet on server)")
+                end
+
+                print("\nOptions:")
+                print(" - Type a menu # (1-" .. math.max(1, #options) .. ")")
+                print(" - Or enter new chest peripheral name (e.g. 561 or minecraft:chest_561)")
+                write("\nChest selection: ")
+                local inputStr = read()
+                if inputStr and inputStr ~= "" then
+                    local selectedName = nil
+                    local selectedLabel = nil
+                    local num = tonumber(inputStr)
+                    if num and options[num] then
+                        selectedName = options[num].name
+                        selectedLabel = options[num].label
+                    else
+                        if peripheral.isPresent(inputStr) and peripheral.hasType(inputStr, "inventory") then
+                            selectedName = inputStr
+                        elseif peripheral.isPresent("minecraft:chest_" .. inputStr) then
+                            selectedName = "minecraft:chest_" .. inputStr
+                        elseif peripheral.isPresent("minecraft:barrel_" .. inputStr) then
+                            selectedName = "minecraft:barrel_" .. inputStr
+                        else
+                            selectedName = inputStr
+                        end
+                        write("Enter friendly label (e.g. Station Chest): ")
+                        selectedLabel = read()
+                        if not selectedLabel or selectedLabel == "" then selectedLabel = selectedName end
+                    end
+
+                    if selectedName then
+                        if SIDES_MAP[selectedName] then
+                            term.setTextColor(colors.red)
+                            print("\nCannot use computer side '" .. selectedName .. "'!")
+                            print("The chest MUST have a Wired Modem attached to connect to the network.")
+                            sleep(2.5)
+                        else
+                            stationConfig.chest = selectedName
+                            stationConfig.label = selectedLabel or selectedName
+                            saveStationConfig()
+                            connectServer()
+                            updateHeaderLabels()
+                            renderQuickOrderGrid()
+                            term.setTextColor(colors.green)
+                            print("\nSaved target chest: " .. stationConfig.chest)
+                            sleep(1.5)
+                        end
+                    end
                 end
                 drawConsoleHeader()
 
