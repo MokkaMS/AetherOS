@@ -3005,7 +3005,6 @@ else
 end
 ]=]
 
-
 embeddedFiles["io_terminal.lua"] = [=[
 -- AetherVault OS: Dedicated I/O Station & Quick-Order Monitor Terminal
 -- Optimized for Advanced Monitors (Touchscreen friendly, compact text, paging, and 1-tap chest adding)
@@ -3925,13 +3924,11 @@ basalt.schedule(function()
                         end
                     end
                     if #matches > 0 then
-                        print("
-Matching items:")
+                        print("\nMatching items:")
                         for idx, m in ipairs(matches) do
                             print(string.format(" %d) %s (%d in storage)", idx, m.displayName, m.total or 0))
                         end
-                        write("
-Select (1-" .. #matches .. "): ")
+                        write("\nSelect (1-" .. #matches .. "): ")
                         local selIdx = tonumber(read())
                         if selIdx and matches[selIdx] then
                             local chosenItem = matches[selIdx]
@@ -3947,8 +3944,7 @@ Select (1-" .. #matches .. "): ")
                             syncOrdersWithServer()
                             renderQuickOrderGrid()
                             term.setTextColor(colors.green)
-                            print("
-Added '+ " .. qty .. " " .. chosenItem.displayName .. "' to monitor!")
+                            print("\nAdded '+ " .. qty .. " " .. chosenItem.displayName .. "' to monitor!")
                             sleep(1.5)
                         end
                     else
@@ -4040,8 +4036,7 @@ Added '+ " .. qty .. " " .. chosenItem.displayName .. "' to monitor!")
 
                 updateHeaderLabels()
                 term.setTextColor(colors.green)
-                print(string.format("
-Coordinates saved: [%d, %d, %d]!", finalX, finalY, finalZ))
+                print(string.format("\nCoordinates saved: [%d, %d, %d]!", finalX, finalY, finalZ))
                 sleep(1.5)
                 drawConsoleHeader()
 
@@ -4054,8 +4049,7 @@ Coordinates saved: [%d, %d, %d]!", finalX, finalY, finalZ))
                 print("==============================================")
                 term.setTextColor(colors.white)
                 print("An IO chest must have a Wired Modem connected")
-                print("to the AetherVault network cable.
-")
+                print("to the AetherVault network cable.\n")
 
                 if not serverId then connectServer() end
 
@@ -4083,12 +4077,10 @@ Coordinates saved: [%d, %d, %d]!", finalX, finalY, finalZ))
                     print(" (None registered yet on server)")
                 end
 
-                print("
-Options:")
+                print("\nOptions:")
                 print(" - Type a menu # (1-" .. math.max(1, #options) .. ")")
                 print(" - Or enter new chest peripheral name (e.g. 561 or minecraft:chest_561)")
-                write("
-Chest selection: ")
+                write("\nChest selection: ")
                 local inputStr = read()
                 if inputStr and inputStr ~= "" then
                     local selectedName = nil
@@ -4117,8 +4109,7 @@ Chest selection: ")
                     if selectedName then
                         if SIDES_MAP[selectedName] then
                             term.setTextColor(colors.red)
-                            print("
-Cannot use computer side '" .. selectedName .. "'!")
+                            print("\nCannot use computer side '" .. selectedName .. "'!")
                             print("The chest MUST have a Wired Modem attached to connect to the network.")
                             sleep(2.5)
                         else
@@ -4174,8 +4165,7 @@ Cannot use computer side '" .. selectedName .. "'!")
                             updateHeaderLabels()
                             renderQuickOrderGrid()
                             term.setTextColor(colors.green)
-                            print("
-Saved target chest: " .. stationConfig.chest)
+                            print("\nSaved target chest: " .. stationConfig.chest)
                             sleep(1.5)
                         end
                     end
