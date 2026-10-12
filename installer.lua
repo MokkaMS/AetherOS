@@ -1074,9 +1074,31 @@ local function drawHeader()
     print()
 end
 
+local function getWirelessModemSide()
+    for _, s in ipairs(rs.getSides()) do
+        if peripheral.isPresent(s) and peripheral.getType(s) == "modem" then
+            if peripheral.call(s, "isWireless") then
+                return s
+            end
+        end
+    end
+    return nil
+end
+
 local function getGPSCoords()
+    local wSide = getWirelessModemSide()
+    if not wSide then
+        term.setTextColor(colors.yellow)
+        print("[!] No Wireless Modem attached to this computer.")
+        print("    CC:Tweaked GPS requires an attached Wireless/Ender Modem.")
+        print("    (Wired modems cannot transmit/receive wireless GPS signals).")
+        return nil
+    end
+    if not rednet.isOpen(wSide) then
+        pcall(rednet.open, wSide)
+    end
     term.setTextColor(colors.cyan)
-    write("Locating GPS coordinates...")
+    write("Locating GPS coordinates via '" .. wSide .. "' (3s)... ")
     local x, y, z = gps.locate(3)
     print()
     if x and y and z then
@@ -1085,7 +1107,7 @@ local function getGPSCoords()
         return x, y, z
     else
         term.setTextColor(colors.orange)
-        print("GPS signal not found (no GPS host in range).")
+        print("GPS signal not found (ensure >= 4 GPS hosts are running in range).")
         return nil
     end
 end
@@ -3030,6 +3052,41 @@ if not modemOK then
     return
 end
 
+local updateHeaderLabels = nil
+
+-- Check for physically attached Wireless Modem (required for CC:Tweaked GPS)
+local function getWirelessModemSide()
+    for _, side in ipairs(rs.getSides()) do
+        if peripheral.isPresent(side) and peripheral.getType(side) == "modem" then
+            if peripheral.call(side, "isWireless") then
+                return side
+            end
+        end
+    end
+    return nil
+end
+
+-- Safely scan for GPS coordinates with adequate timeout (3s)
+local function scanGPS(timeout)
+    timeout = timeout or 3
+    local wSide = getWirelessModemSide()
+    if not wSide then
+        return nil, "No wireless modem attached"
+    end
+    if not rednet.isOpen(wSide) then
+        pcall(rednet.open, wSide)
+    end
+    if gps and gps.locate then
+        local gx, gy, gz = gps.locate(timeout)
+        if gx and gy and gz then
+            return { x = math.floor(gx), y = math.floor(gy), z = math.floor(gz) }, nil
+        else
+            return nil, "No GPS response received within timeout"
+        end
+    end
+    return nil, "GPS API not available"
+end
+
 local STATION_CONFIG_FILE = "/io_station_config.json"
 local QUICK_ORDERS_FILE = "/quickorders.json"
 
@@ -3271,19 +3328,18 @@ local function connectServer()
             local regY = stationConfig.y or 0
             local regZ = stationConfig.z or 0
 
-            -- If still 0,0,0, try GPS locate as fallback
+            -- If still 0,0,0, try GPS locate as fallback (checks wireless modem with 3s timeout)
             if regX == 0 and regY == 0 and regZ == 0 then
-                if gps and gps.locate then
-                    local gx, gy, gz = gps.locate(1)
-                    if gx and gy and gz then
-                        regX = math.floor(gx)
-                        regY = math.floor(gy)
-                        regZ = math.floor(gz)
-                        stationConfig.x = regX
-                        stationConfig.y = regY
-                        stationConfig.z = regZ
-                        saveStationConfig()
-                    end
+                local gpsPos = scanGPS(3)
+                if gpsPos then
+                    regX = gpsPos.x
+                    regY = gpsPos.y
+                    regZ = gpsPos.z
+                    stationConfig.x = regX
+                    stationConfig.y = regY
+                    stationConfig.z = regZ
+                    saveStationConfig()
+                    if updateHeaderLabels then updateHeaderLabels() end
                 end
             end
 
@@ -3371,7 +3427,7 @@ local chestLabel = headerFrame:addLabel()
     :setPosition(1, 2)
     :setForeground(colors.cyan)
 
-local function updateHeaderLabels()
+updateHeaderLabels = function()
     local shortChest = stationConfig.label or stationConfig.chest or "None"
     local coordsStr = ""
     if stationConfig.x and (stationConfig.x ~= 0 or stationConfig.y ~= 0 or stationConfig.z ~= 0) then
@@ -3880,8 +3936,24 @@ local function drawConsoleHeader()
     local chestName = stationConfig.chest or "None"
     local chestLabelStr = stationConfig.label and (" (" .. stationConfig.label .. ")") or ""
     print("Target Chest: " .. chestName .. chestLabelStr)
+    local hasCoords = (stationConfig.x and stationConfig.x ~= 0) or
+                      (stationConfig.y and stationConfig.y ~= 0) or
+                      (stationConfig.z and stationConfig.z ~= 0)
     local coordsStr = string.format("X=%d, Y=%d, Z=%d", stationConfig.x or 0, stationConfig.y or 0, stationConfig.z or 0)
-    print("Coordinates:  " .. coordsStr)
+    if hasCoords then
+        print("Coordinates:  " .. coordsStr .. " (Calibrated)")
+    else
+        print("Coordinates:  " .. coordsStr .. " (Uncalibrated)")
+    end
+    local wSide = getWirelessModemSide()
+    if wSide then
+        term.setTextColor(colors.green)
+        print("GPS Hardware: Wireless Modem on '" .. wSide .. "'")
+    else
+        term.setTextColor(colors.yellow)
+        print("GPS Hardware: None (Attach Wireless Modem for GPS)")
+    end
+    term.setTextColor(colors.white)
     print("Quick-Orders: " .. #quickOrders .. " buttons configured")
     print("Server:       " .. tostring(serverHostname))
     print()
@@ -3979,27 +4051,33 @@ basalt.schedule(function()
                 print("Current Coords: X=" .. (stationConfig.x or 0) .. ", Y=" .. (stationConfig.y or 0) .. ", Z=" .. (stationConfig.z or 0))
                 print()
 
-                local gpsX, gpsY, gpsZ = nil, nil, nil
-                if gps and gps.locate then
-                    term.setTextColor(colors.cyan)
-                    write("Scanning for GPS signal...")
-                    gpsX, gpsY, gpsZ = gps.locate(2)
-                    print()
-                end
-
                 local finalX, finalY, finalZ
-                if gpsX and gpsY and gpsZ then
-                    term.setTextColor(colors.green)
-                    print(string.format("GPS position detected: X=%d, Y=%d, Z=%d", math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)))
-                    term.setTextColor(colors.white)
-                    write("Use detected GPS coords? (Y/n): ")
-                    local useGps = (read() or ""):lower()
-                    if useGps == "" or useGps == "y" then
-                        finalX, finalY, finalZ = math.floor(gpsX), math.floor(gpsY), math.floor(gpsZ)
-                    end
+                local wSide = getWirelessModemSide()
+                if not wSide then
+                    term.setTextColor(colors.yellow)
+                    print("[!] No Wireless Modem attached to this computer.")
+                    print("    CC:Tweaked GPS requires an attached Wireless or Ender Modem.")
+                    print("    (Wired modems cannot receive wireless GPS satellite pings).")
+                    print("    Tip: Attach a Wireless Modem to any open face for auto-GPS.\n")
                 else
-                    term.setTextColor(colors.orange)
-                    print("No GPS signal found in range.")
+                    term.setTextColor(colors.cyan)
+                    write("Scanning for GPS signal via '" .. wSide .. "' (3s)... ")
+                    local gpsPos, err = scanGPS(3)
+                    print()
+                    if gpsPos then
+                        term.setTextColor(colors.green)
+                        print(string.format("GPS position detected: X=%d, Y=%d, Z=%d", gpsPos.x, gpsPos.y, gpsPos.z))
+                        term.setTextColor(colors.white)
+                        write("Use detected GPS coords? (Y/n): ")
+                        local useGps = (read() or ""):lower()
+                        if useGps == "" or useGps == "y" then
+                            finalX, finalY, finalZ = gpsPos.x, gpsPos.y, gpsPos.z
+                        end
+                    else
+                        term.setTextColor(colors.orange)
+                        print("No GPS signal received within 3 seconds.")
+                        print("Ensure at least 4 GPS satellites/hosts are running within range.\n")
+                    end
                 end
 
                 if not finalX then
@@ -4134,20 +4212,30 @@ basalt.schedule(function()
                             write(string.format("Configure coordinates now? Current: [%d,%d,%d] (y/N): ", stationConfig.x or 0, stationConfig.y or 0, stationConfig.z or 0))
                             local setCoords = (read() or ""):lower()
                             if setCoords == "y" then
+                                local wSide = getWirelessModemSide()
                                 local gx, gy, gz = nil, nil, nil
-                                if gps and gps.locate then
-                                    gx, gy, gz = gps.locate(2)
-                                end
-                                if gx and gy and gz then
-                                    write(string.format("Use detected GPS coords [%d,%d,%d]? (Y/n): ", math.floor(gx), math.floor(gy), math.floor(gz)))
-                                    local uGps = (read() or ""):lower()
-                                    if uGps == "" or uGps == "y" then
-                                        stationConfig.x = math.floor(gx)
-                                        stationConfig.y = math.floor(gy)
-                                        stationConfig.z = math.floor(gz)
+                                if wSide then
+                                    write("Scanning for GPS signal via '" .. wSide .. "'... ")
+                                    local gpsPos = scanGPS(3)
+                                    if gpsPos then
+                                        gx, gy, gz = gpsPos.x, gpsPos.y, gpsPos.z
+                                        print("OK!")
+                                        write(string.format("Use detected GPS coords [%d,%d,%d]? (Y/n): ", gx, gy, gz))
+                                        local uGps = (read() or ""):lower()
+                                        if uGps == "" or uGps == "y" then
+                                            stationConfig.x = gx
+                                            stationConfig.y = gy
+                                            stationConfig.z = gz
+                                        end
+                                    else
+                                        print("Failed (no signal).")
                                     end
+                                else
+                                    term.setTextColor(colors.yellow)
+                                    print("Note: No Wireless Modem attached. (GPS requires Wireless Modem).")
+                                    term.setTextColor(colors.white)
                                 end
-                                if not gx then
+                                if not gx or (stationConfig.x ~= gx) then
                                     write(string.format("Enter X [%d]: ", stationConfig.x or 0))
                                     local inX = read()
                                     if inX ~= "" and tonumber(inX) then stationConfig.x = tonumber(inX) end
@@ -4189,6 +4277,9 @@ basalt.schedule(function()
     refreshStock()
     updateHeaderLabels()
     renderQuickOrderGrid()
+    if monitor then
+        drawConsoleHeader()
+    end
 end)
 
 if basalt.run then

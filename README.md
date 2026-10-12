@@ -35,7 +35,9 @@
 - **Computer**: Advanced Computer.
 - **Monitor**: Advanced Monitor placed adjacent to the computer (e.g., 2x1, 3x2, or 1x1).
 - **Chest**: Any chest or barrel connected to the wired networking cable with a Wired Modem (modem right-clicked active).
-- **Networking**: Wired or Wireless Modem attached to connect to the AetherVault storage network.
+- **Networking**: **Wired Modem** attached to connect to the AetherVault storage network cable.
+- **GPS Positioning (Recommended)**: Attach a **Wireless Modem** (or Ender Modem) to any open side (top, left, right) of the computer. 
+  > In CC:Tweaked, `gps.locate()` requires an attached Wireless Modem to receive sky satellite pings. Wired modems only transmit through cables. With a Wireless Modem attached, the I/O Station automatically detects its 3D coordinates on boot!
 
 ### 3. Storage Chests & I/O Dropoff Chests
 - **Storage Chests**: Chests/barrels connected to the wired modem network used for mass item storage.

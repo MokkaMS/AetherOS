@@ -51,9 +51,31 @@ local function drawHeader()
     print()
 end
 
+local function getWirelessModemSide()
+    for _, s in ipairs(rs.getSides()) do
+        if peripheral.isPresent(s) and peripheral.getType(s) == "modem" then
+            if peripheral.call(s, "isWireless") then
+                return s
+            end
+        end
+    end
+    return nil
+end
+
 local function getGPSCoords()
+    local wSide = getWirelessModemSide()
+    if not wSide then
+        term.setTextColor(colors.yellow)
+        print("[!] No Wireless Modem attached to this computer.")
+        print("    CC:Tweaked GPS requires an attached Wireless/Ender Modem.")
+        print("    (Wired modems cannot transmit/receive wireless GPS signals).")
+        return nil
+    end
+    if not rednet.isOpen(wSide) then
+        pcall(rednet.open, wSide)
+    end
     term.setTextColor(colors.cyan)
-    write("Locating GPS coordinates...")
+    write("Locating GPS coordinates via '" .. wSide .. "' (3s)... ")
     local x, y, z = gps.locate(3)
     print()
     if x and y and z then
@@ -62,7 +84,7 @@ local function getGPSCoords()
         return x, y, z
     else
         term.setTextColor(colors.orange)
-        print("GPS signal not found (no GPS host in range).")
+        print("GPS signal not found (ensure >= 4 GPS hosts are running in range).")
         return nil
     end
 end
