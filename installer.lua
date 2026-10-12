@@ -2711,14 +2711,118 @@ local function updateWithdrawButtonText()
     end
 end
 
+-- Compact count formatter guaranteeing max 5 characters
+local function formatCount(n)
+    n = tonumber(n) or 0
+    if n >= 10000000 then
+        return string.format("%dM", math.floor(n / 1000000))
+    elseif n >= 1000000 then
+        return string.format("%.1fM", n / 1000000)
+    elseif n >= 100000 then
+        return string.format("%dk", math.floor(n / 1000))
+    elseif n >= 10000 then
+        return string.format("%.1fk", n / 1000)
+    else
+        return tostring(n)
+    end
+end
+
+-- Smart name abbreviator for tight 26-column screens (differentiates Deepslate, Blackstone, etc.)
+local function smartFormatName(name, maxLen)
+    maxLen = maxLen or 15
+    if not name or #name <= maxLen then
+        return name or ""
+    end
+
+    local s = name
+    -- Primary replacements: abbreviate common long prefixes so unique suffixes (ores, bricks, etc.) fit
+    s = s:gsub("Deepslate", "DS")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Blackstone", "BS")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Cobblestone", "Cobble")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Enchanted", "Ench.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Polished", "Pol.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Chiseled", "Chis.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Cracked", "Crk.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Weathered", "Weath.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Oxidized", "Oxid.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Reinforced", "Reinf.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Netherite", "Neth.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Redstone", "Redst.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Golden", "Gold")
+    if #s <= maxLen then return s end
+
+    -- Secondary replacements for item types/descriptors
+    s = s:gsub("Diamond", "Dia.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Emerald", "Em.")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Stairs", "Stair")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Bricks", "Brk")
+    if #s <= maxLen then return s end
+
+    s = s:gsub("Copper", "Cop.")
+    if #s <= maxLen then return s end
+
+    -- Fallback: middle truncation preserving both beginning and end
+    local headLen = math.floor((maxLen - 2) / 2) + 1
+    local tailLen = maxLen - 2 - headLen
+    return s:sub(1, headLen) .. ".." .. s:sub(#s - tailLen + 1)
+end
+
+local function formatItemEntry(isSel, rawName, total)
+    local prefix = isSel and "[x]" or "[ ]"
+    local shortName = smartFormatName(rawName, 15)
+    local countStr = formatCount(total)
+    -- Total width: 3 (prefix) + 1 (space) + 15 (shortName) + 1 (space) + 5 (count right-aligned) = 25 chars
+    return string.format("%s %-15s %5s", prefix, shortName, countStr)
+end
+
 local function updateAutoComplete(filterText)
     currentAutoMatch = nil
     filterText = (filterText or ""):lower()
     if filterText ~= "" then
         for _, item in ipairs(currentItems) do
-            if item.displayName:lower():find(filterText, 1, true) == 1 or item.name:lower():find(filterText, 1, true) == 1 then
+            local short = smartFormatName(item.displayName, 15):lower()
+            if item.displayName:lower():find(filterText, 1, true) == 1 or item.name:lower():find(filterText, 1, true) == 1 or short:find(filterText, 1, true) == 1 then
                 currentAutoMatch = item
                 break
+            end
+        end
+        if not currentAutoMatch then
+            for _, item in ipairs(currentItems) do
+                local short = smartFormatName(item.displayName, 15):lower()
+                if item.displayName:lower():find(filterText, 1, true) or item.name:lower():find(filterText, 1, true) or short:find(filterText, 1, true) then
+                    currentAutoMatch = item
+                    break
+                end
             end
         end
     end
@@ -2729,7 +2833,6 @@ local filteredItems = {}
 local function updateListItemAt(idx, itemName)
     if not idx or not itemName then return end
     local isSel = selectedItems[itemName]
-    local prefix = isSel and "[x]" or "[ ]"
     local itObj = nil
     for _, it in ipairs(currentItems) do
         if it.name == itemName then
@@ -2738,11 +2841,8 @@ local function updateListItemAt(idx, itemName)
         end
     end
     local dispName = itObj and itObj.displayName or itemName
-    if #dispName > 12 then
-        dispName = dispName:sub(1, 10) .. ".."
-    end
     local total = itObj and itObj.total or 0
-    local entryText = string.format("%s %-12s %5d", prefix, dispName, total)
+    local entryText = formatItemEntry(isSel, dispName, total)
     if itemList.editItem then
         pcall(itemList.editItem, itemList, idx, entryText)
     elseif itemList.getItem then
@@ -2766,14 +2866,10 @@ local function populateList()
     updateAutoComplete(filter)
 
     for _, item in ipairs(currentItems) do
-        if filter == "" or item.displayName:lower():find(filter, 1, true) then
+        local short = smartFormatName(item.displayName, 15):lower()
+        if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) or short:find(filter, 1, true) then
             local isSel = selectedItems[item.name]
-            local prefix = isSel and "[x]" or "[ ]"
-            local dispName = item.displayName
-            if #dispName > 12 then
-                dispName = dispName:sub(1, 10) .. ".."
-            end
-            local entryText = string.format("%s %-12s %5d", prefix, dispName, item.total)
+            local entryText = formatItemEntry(isSel, item.displayName, item.total)
             itemList:addItem(entryText)
             table.insert(filteredItems, item.name)
         end
@@ -2844,10 +2940,10 @@ local function resolveSelectedItemName(self, item, index)
     end
 
     if strText then
-        local cleanName = strText:match("^%[%p%]%s+(.-)%s+%d+$") or strText:match("^%[%p%]%s+(.+)$") or strText
+        local cleanName = strText:match("^%[%p%]%s+(.-)%s+[%d%.kM]+$") or strText:match("^%[%p%]%s+(.+)$") or strText
         cleanName = cleanName:gsub("^%s*(.-)%s*$", "%1")
         for _, it in ipairs(currentItems) do
-            if it.displayName == cleanName or it.name == cleanName or cleanName:find(it.displayName, 1, true) then
+            if it.displayName == cleanName or it.name == cleanName or smartFormatName(it.displayName, 15) == cleanName or cleanName:find(it.displayName, 1, true) then
                 return it.name, idx
             end
         end
@@ -2863,6 +2959,14 @@ local function handleSelection(self, item, index)
     local itemName, idx = resolveSelectedItemName(self, item, index)
     if itemName then
         selectedItems[itemName] = not selectedItems[itemName]
+        local itObj = nil
+        for _, it in ipairs(currentItems) do
+            if it.name == itemName then itObj = it; break end
+        end
+        if itObj then
+            local stateStr = selectedItems[itemName] and "Selected" or "Deselected"
+            statusLabel.text = string.format(" %s: %s (%s)", stateStr, itObj.displayName, formatCount(itObj.total))
+        end
         if idx and itemList.editItem then
             updateListItemAt(idx, itemName)
             updateWithdrawButtonText()
@@ -2917,7 +3021,8 @@ end)
 selectAllBtn:onClick(function()
     local filter = (searchInput.text or searchInput.value or ""):lower()
     for _, item in ipairs(currentItems) do
-        if filter == "" or item.displayName:lower():find(filter, 1, true) then
+        local short = smartFormatName(item.displayName, 15):lower()
+        if filter == "" or item.displayName:lower():find(filter, 1, true) or item.name:lower():find(filter, 1, true) or short:find(filter, 1, true) then
             selectedItems[item.name] = true
         end
     end
